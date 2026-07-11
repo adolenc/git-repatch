@@ -19,7 +19,7 @@ the undo.
 
 ## Install
 
-Copy `git-repatch` somewhere on your `$PATH` and make it executable:
+Put [`git-repatch`](./git-repatch) somewhere on your `$PATH` and make it executable:
 
 ```sh
 cp git-repatch /usr/local/bin/
