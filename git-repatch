@@ -1,0 +1,521 @@
+#!/usr/bin/env bash
+#
+# git-repatch — replay an existing change through your editor into the
+# working tree.
+#
+# You just made a project-wide change, and now you need the same lines again
+# with a different identifier. repatch shows the change as a patch, you edit
+# the '+' lines, and the edited copy lands in your working tree as unstaged
+# changes, right next to the original. HEAD and the index are never touched.
+#
+# Dependency-free by design: bash + sed + awk + git, i.e. it runs anywhere
+# git itself runs (Git for Windows bundles all of these; macOS has them).
+#
+# No fuzz, ever: every apply is strict. When the source change is already in
+# your tree, the patch is re-based onto the current file contents first, so
+# the exact context does the anchoring (a fuzzy apply can silently drop an
+# added line at the wrong spot; a strict one either lands exactly or fails
+# atomically and reopens your editor).
+
+set -u
+
+PROG=git-repatch
+
+die()  { printf '%s: %s\n' "$PROG" "$2" >&2; exit "$1"; }
+warn() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+say()  { [ -n "$QUIET" ] || printf '%s\n' "$*"; }
+
+usage() {
+	cat <<'EOF'
+usage: git repatch [<rev> | <rev>..<rev> | --staged | --worktree]
+                   [options] [--] [<pathspec>...]
+
+Turn a change into an editable patch, open it in your editor, and strictly
+apply the saved result to the working tree as unstaged changes. HEAD and the
+index are never touched.
+
+If the source change is already in your working tree (the usual case: you
+just committed it), you get "duplicate" mode: the original change is shown as
+context with a pre-seeded copy of every added block as '+' lines -- edit the
+copy, save, and the sibling change lands right after the original. If the
+change is absent, you get "plain" mode: the raw patch, cherry-pick-with-edit.
+
+source (default: HEAD)
+  <rev>            that commit's diff          e.g. git repatch HEAD~2
+  <rev>..<rev>     a range's cumulative diff   e.g. git repatch main..topic
+  --staged         the index vs HEAD
+  --worktree       all uncommitted changes vs HEAD (use this to stack a
+                   third variant on top of a previous repatch)
+  -- <pathspec>    limit the source diff to these paths
+
+options
+  -s, --sed EXPR   sed s/pat/repl/[flags] applied to the seeded '+' lines
+                   only (repeatable); skips the editor unless --edit
+      --edit       open the editor even when -s is given
+      --plain      force plain mode (skip the presence probe)
+      --check      dry run: validate everything, write nothing
+  -q, --quiet      suppress the report
+  -h, --help       this
+
+In the editor: edit ONLY the '+' lines; context lines must keep matching your
+tree. Deleting a '+' line, a hunk, or a file section skips it. Changing a
+context line's leading ' ' to '-' deletes that line from your tree. Lines
+starting with '#' are ignored. An empty file aborts. Failed applies write
+nothing and reopen the editor with git's error message.
+EOF
+	exit 0
+}
+
+# ---------------------------------------------------------------------------
+# args
+
+SOURCE=HEAD; KIND=rev; SEEN_SRC=
+SEDEXPRS=(); DO_EDIT=; DO_PLAIN=; DO_CHECK=; QUIET=
+PATHSPEC=()
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-h|--help)         usage ;;
+	--staged|--cached) KIND=staged; SEEN_SRC=1 ;;
+	--worktree|--dirty) KIND=worktree; SEEN_SRC=1 ;;
+	-s|--sed)
+		[ $# -ge 2 ] || die 3 "$1 needs an argument"
+		case "$2" in s*) ;; *) die 3 "--sed expression must be a sed s command: $2" ;; esac
+		SEDEXPRS[${#SEDEXPRS[@]}]=$2; shift ;;
+	--edit)            DO_EDIT=1 ;;
+	--plain)           DO_PLAIN=1 ;;
+	--check)           DO_CHECK=1 ;;
+	-q|--quiet)        QUIET=1 ;;
+	--)                shift; while [ $# -gt 0 ]; do PATHSPEC[${#PATHSPEC[@]}]=$1; shift; done; break ;;
+	-*)                die 3 "unknown option: $1 (try --help)" ;;
+	*)
+		[ -n "$SEEN_SRC" ] && die 3 "more than one source given: '$SOURCE' and '$1'"
+		SOURCE=$1; SEEN_SRC=1
+		case "$1" in *..*) KIND=range ;; *) KIND=rev ;; esac ;;
+	esac
+	shift
+done
+
+# ---------------------------------------------------------------------------
+# environment
+
+git rev-parse --git-dir >/dev/null 2>&1 || die 3 "not a git repository"
+TOP=$(git rev-parse --show-toplevel 2>/dev/null) || die 3 "this command needs a work tree"
+GITDIR=$(git rev-parse --absolute-git-dir)
+git rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null || die 3 "unborn HEAD; commit something first"
+
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/repatch.XXXXXX") || die 3 "cannot create temp dir"
+trap 'rm -rf "$TMP"' EXIT
+
+BUFFER=$GITDIR/REPATCH_EDIT.diff   # .diff so editors pick the right syntax
+APPLIED=$GITDIR/REPATCH.diff       # last successfully applied patch
+
+# Config that would change the shape of generated patches out from under us.
+HARDEN=(-c color.ui=false -c core.quotePath=false -c diff.noprefix=false
+        -c diff.mnemonicPrefix=false -c diff.external= -c diff.relative=false
+        -c diff.suppressBlankEmpty=false)
+DIFFOPTS=(--patch --no-color --no-ext-diff --no-textconv --no-renames)
+
+# ---------------------------------------------------------------------------
+# 1. generate the source patch
+
+case "$KIND" in
+rev)
+	git rev-parse --verify --quiet "$SOURCE^{commit}" >/dev/null || die 3 "not a commit: $SOURCE"
+	nparents=$(( $(git rev-list --no-walk --parents "$SOURCE" | head -n1 | wc -w) - 1 ))
+	[ "$nparents" -gt 1 ] && die 3 \
+		"$SOURCE is a merge commit and has no single diff; try a range: git repatch $SOURCE^1..$SOURCE"
+	LABEL="$SOURCE ($(git rev-parse --short "$SOURCE") \"$(git log -1 --format=%s "$SOURCE")\")"
+	GENCMD=(show --format= "$SOURCE") ;;
+range)
+	LABEL="$SOURCE"
+	GENCMD=(diff "$SOURCE") ;;
+staged)
+	LABEL="staged changes"
+	GENCMD=(diff --cached) ;;
+worktree)
+	LABEL="uncommitted changes"
+	GENCMD=(diff HEAD) ;;
+esac
+
+git "${HARDEN[@]}" "${GENCMD[@]}" "${DIFFOPTS[@]}" \
+	${PATHSPEC[@]+--} ${PATHSPEC[@]+"${PATHSPEC[@]}"} > "$TMP/src.raw" \
+	|| die 3 "could not generate the source diff"
+
+grep -q '^diff --git ' "$TMP/src.raw" || die 1 "no changes to repatch ($LABEL)"
+if grep -q '^--- "' "$TMP/src.raw" || grep -q '^+++ "' "$TMP/src.raw"; then
+	die 3 "a path in this diff needs quoting (special characters); not supported"
+fi
+
+# Drop file sections repatch cannot do anything useful with (binary files,
+# submodule pointers); they would also poison the presence probes below.
+awk -v NOTES="$TMP/notes" '
+	function flush() {
+		if (n == 0) return
+		if (drop != "") print "# note: skipped (" drop "): " hdr > NOTES
+		else for (i = 1; i <= n; i++) print line[i]
+		n = 0; drop = ""
+	}
+	/^diff --git / { flush(); hdr = $0 }
+	{
+		line[++n] = $0
+		if ($0 ~ /^(Binary files |GIT binary patch)/) drop = "binary file"
+		if ($0 ~ /^(old|new|deleted file|new file) mode 160000/ || $0 ~ /^[+-]Subproject commit /) drop = "submodule"
+	}
+	END { flush() }
+' "$TMP/src.raw" > "$TMP/src.diff"
+
+grep -q '^diff --git ' "$TMP/src.diff" || die 1 "nothing repatchable in $LABEL (only binary/submodule changes)"
+
+# ---------------------------------------------------------------------------
+# 2. probe: is the source change present in the working tree or not?
+#
+# Strictly. `git apply -R --check` succeeds iff every hunk of the change,
+# context included, sits in the tree exactly; the forward check succeeds iff
+# the tree looks like the change was never applied. Anything in between has
+# no safe interpretation, so we stop and say why.
+
+MODE=
+if [ -n "$DO_PLAIN" ]; then
+	MODE=plain
+elif git -C "$TOP" apply --check -R "$TMP/src.diff" 2>"$TMP/probe.err"; then
+	MODE=dup
+elif git -C "$TOP" apply --check "$TMP/src.diff" 2>/dev/null; then
+	MODE=plain
+else
+	{
+		printf '%s: the source change is neither cleanly present in nor cleanly absent\n' "$PROG"
+		printf 'from your working tree, so an edited copy has no safe place to land.\n'
+		printf 'likely causes:\n'
+		printf '  - you already repatched this source once (the copy now sits inside the\n'
+		printf "    original's context). repatch the uncommitted result instead:\n"
+		printf '        git repatch --worktree\n'
+		printf '  - uncommitted edits overlap the source change: commit or stash them first\n'
+		printf '  - the source commit is older history that later commits reworked\n'
+		printf 'git said (probing for the change with `git apply -R --check`):\n'
+		sed 's/^/    /;3q' "$TMP/probe.err"
+	} >&2
+	exit 2
+fi
+
+# ---------------------------------------------------------------------------
+# 3. build the editor buffer body
+#
+# plain mode: the source patch itself.
+#
+# dup mode: the patch cannot be applied on top of itself (its context
+# describes the tree from *before* the change), so re-base it onto the
+# current tree: reverse-apply the source in a temp copy to reconstruct
+# "current minus change", re-diff with -U0 to learn where every added block
+# sits in *current* line numbers, insert a duplicate of each block right
+# after the original in a second temp copy, and let git diff render the
+# result as a conventional patch whose pre-image IS the current tree.
+
+: > "$TMP/notes.dup"; : > "$TMP/commented"
+
+if [ "$MODE" = plain ]; then
+	cp "$TMP/src.diff" "$TMP/body.diff"
+else
+	# paths touched by the (sanitized) source patch
+	awk '
+		/^--- a\// { p = substr($0, 7) } /^\+\+\+ b\// { p = substr($0, 7) }
+		/^(---|\+\+\+) / { if (p != "") { sub(/\t$/, "", p); if (!seen[p]++) print p; p = "" } }
+	' "$TMP/src.diff" > "$TMP/paths"
+
+	mkdir -p "$TMP/cur"; : > "$TMP/nonl"
+	while IFS= read -r p; do
+		[ -f "$TOP/$p" ] || continue        # deleted by source: reverse-apply recreates it
+		mkdir -p "$TMP/cur/$(dirname "$p")"
+		cp -p "$TOP/$p" "$TMP/cur/$p"
+		[ -n "$(tail -c1 "$TOP/$p")" ] && printf '%s\n' "$p" >> "$TMP/nonl"
+	done < "$TMP/paths"
+
+	cp -pR "$TMP/cur" "$TMP/base"
+	git -C "$TMP/base" apply -R --whitespace=nowarn "$TMP/src.diff" \
+		|| die 2 "internal: reverse-apply diverged from the probe (tree changed underneath us?)"
+
+	git -C "$TMP" "${HARDEN[@]}" diff --no-index --no-color --no-ext-diff -U0 base cur > "$TMP/rediff"
+	case $? in 0|1) ;; *) die 3 "internal: re-diff failed" ;; esac
+
+	# rediff -> the editor buffer body: for each added block, a full-context
+	# hunk (context read back from the current file) with a '+' duplicate of
+	# the block seeded right after the original. Built by hand rather than
+	# re-diffed through git: rendering a self-adjacent duplication is
+	# ambiguous (the diff "slider" problem) and git may rotate the copy
+	# across the original, which would make the seeds straddle it.
+	: > "$TMP/body.diff"
+	awk -v CUR="$TMP/cur" -v BODY="$TMP/body.diff" -v COM="$TMP/commented" \
+	    -v NOTES="$TMP/notes.dup" -v NONL="$TMP/nonl" -v U=3 '
+		BEGIN { while ((getline l < NONL) > 0) nonl[l] = 1; close(NONL) }
+		function flush(   f, ln, nl, r, gs, ge, nr, nls, nle, ls, le, ins, k, i, pre, delta, emitted) {
+			if (state == "normal" && nrun > 0) {
+				f = CUR "/" rel
+				nl = 0; split("", L)
+				while ((getline ln < f) > 0) L[++nl] = ln
+				close(f)
+				delta = 0; emitted = 0
+				r = 1
+				while (r <= nrun) {
+					if (runbad[r]) {
+						print "# note: " rel ": skipped a block at end-of-file without a trailing newline" > NOTES
+						r++; continue
+					}
+					# group runs whose context windows touch into one hunk
+					gs = r; ge = r
+					ls = runstart[r] - U; if (ls < 1) ls = 1
+					le = runend[r] + U; if (le > nl) le = nl
+					while (ge + 1 <= nrun && !runbad[ge + 1]) {
+						nr = ge + 1
+						nls = runstart[nr] - U; if (nls < 1) nls = 1
+						if (nls > le + 1) break
+						ge = nr
+						nle = runend[nr] + U; if (nle > nl) nle = nl
+						if (nle > le) le = nle
+					}
+					ins = 0
+					for (k = gs; k <= ge; k++) ins += runlen[k]
+					if (!emitted) {
+						print "diff --git a/" rel " b/" rel > BODY
+						print "--- a/" rel > BODY
+						print "+++ b/" rel > BODY
+						emitted = 1
+					}
+					pre = le - ls + 1
+					printf "@@ -%d,%d +%d,%d @@\n", ls, pre, ls + delta, pre + ins > BODY
+					i = ls
+					for (k = gs; k <= ge; k++) {
+						while (i <= runend[k]) { print " " L[i] > BODY; i++ }
+						printf "%s", runbuf[k] > BODY
+					}
+					while (i <= le) {
+						print " " L[i] > BODY
+						# a hunk with no trailing context only applies at
+						# EOF, so context always extends to the last line;
+						# mark it incomplete when the file ends without \n
+						if (i == nl && (rel in nonl))
+							print "\\ No newline at end of file" > BODY
+						i++
+					}
+					delta += ins
+					r = ge + 1
+				}
+			} else if (state == "new") {
+				print "# note: " rel ": created by the source change; a file cannot be duplicated" > NOTES
+				print "#       onto itself. a commented copy is at the bottom of this buffer:" > NOTES
+				print "#       remove the leading \"# \" and change its paths to create a sibling." > NOTES
+				for (r = 1; r <= nsec; r++) print "# " secline[r] > COM
+			} else if (state == "del") {
+				print "# note: " rel ": deleted by the source change; nothing to duplicate" > NOTES
+			}
+			state = "none"; nrun = 0; nsec = 0; rel = ""; isnew = 0; isdel = 0
+		}
+		/^diff --git / {
+			flush(); state = "head"
+			l = $0
+			gsub(/ a\/cur\//, " a/", l); gsub(/ b\/cur\//, " b/", l)
+			gsub(/ a\/base\//, " a/", l); gsub(/ b\/base\//, " b/", l)
+			secline[++nsec] = l
+			next
+		}
+		state == "none" { next }
+		state == "head" {
+			if ($0 ~ /^@@ /) {
+				state = isnew ? "new" : (isdel ? "del" : "normal")
+			} else {
+				if ($0 ~ /^--- \/dev\/null/) isnew = 1
+				if ($0 ~ /^\+\+\+ \/dev\/null/) isdel = 1
+				if ($0 ~ /^\+\+\+ b\/cur\//) { rel = substr($0, 11); sub(/\t$/, "", rel) }
+				if ($0 ~ /^--- a\/base\//)   { if (rel == "") { rel = substr($0, 12); sub(/\t$/, "", rel) } }
+				l = $0
+				sub(/^\+\+\+ b\/cur\//, "+++ b/", l)
+				sub(/^--- a\/base\//, "--- a/", l)
+				secline[++nsec] = l
+				next
+			}
+		}
+		state == "new" { secline[++nsec] = $0; next }
+		state == "del" { next }
+		# state == "normal": hunks of the -U0 rediff
+		/^@@ / {
+			c = $3; sub(/^\+/, "", c); d = c
+			sub(/,.*/, "", c); if (d ~ /,/) sub(/^[0-9]*,/, "", d); else d = 1
+			c += 0; d += 0
+			if (d > 0) {
+				nrun++
+				runstart[nrun] = c; runend[nrun] = c + d - 1
+				runlen[nrun] = 0; runbuf[nrun] = ""; runbad[nrun] = 0
+				open = 1
+			}
+			else open = 0
+			lastp = ""
+			next
+		}
+		/^\+/  { if (open) { runbuf[nrun] = runbuf[nrun] $0 "\n"; runlen[nrun]++; lastp = "+" }; next }
+		/^-/   { lastp = "-"; next }
+		/^\\/  { if (open && lastp == "+") runbad[nrun] = 1; next }
+		END { flush() }
+	' "$TMP/rediff" || die 3 "internal: could not transform the re-diff"
+
+	if ! [ -s "$TMP/body.diff" ] && ! [ -s "$TMP/commented" ]; then
+		[ -s "$TMP/notes.dup" ] && sed 's/^# //' "$TMP/notes.dup" >&2
+		die 1 "nothing to duplicate in $LABEL (additions are what repatch copies; see --plain)"
+	fi
+fi
+
+# ---------------------------------------------------------------------------
+# 4. assemble the buffer, run -s substitutions, open the editor
+
+write_buffer() {  # $1 = path of an error file to quote, or ""
+	{
+		if [ "$MODE" = dup ]; then
+			printf '# repatch %s\n# -> duplicate into the working tree\n' "$LABEL"
+		else
+			printf '# repatch %s\n# -> apply to the working tree (change not present: plain mode)\n' "$LABEL"
+		fi
+		if [ -n "$1" ] && [ -s "$1" ]; then
+			printf '#\n# APPLY FAILED -- git said:\n'
+			sed 's/^/#     /' "$1"
+			printf '# fix the patch below and save to retry; empty file aborts.\n'
+		fi
+		cat <<'EOF'
+#
+# Edit ONLY the '+' lines (e.g. :g/^+/s/foo/bar/g). Context lines must keep
+# matching your working tree, so a whole-buffer :%s/foo/bar/g will make the
+# apply fail (nothing is written on failure, and you get to retry).
+# To also delete an existing line, change its leading ' ' to '-'.
+# Drop a '+' line / hunk / file section to skip it. '#' lines are ignored.
+# Save and quit to apply to the working tree; an empty file aborts.
+EOF
+		[ -s "$TMP/notes" ]     && { printf '#\n'; cat "$TMP/notes"; }
+		[ -s "$TMP/notes.dup" ] && { printf '#\n'; cat "$TMP/notes.dup"; }
+		cat "$TMP/body.diff"
+		[ -s "$TMP/commented" ] && cat "$TMP/commented"
+	} > "$BUFFER"
+}
+
+write_buffer ""
+
+if [ ${#SEDEXPRS[@]} -gt 0 ]; then
+	SEDARGS=()
+	for e in "${SEDEXPRS[@]}"; do
+		# guard: only touch '+' payload lines, never the '+++' file header
+		SEDARGS[${#SEDARGS[@]}]=-e; SEDARGS[${#SEDARGS[@]}]='/^+/{'
+		SEDARGS[${#SEDARGS[@]}]=-e; SEDARGS[${#SEDARGS[@]}]="/^+++ /!$e"
+		SEDARGS[${#SEDARGS[@]}]=-e; SEDARGS[${#SEDARGS[@]}]='}'
+	done
+	sed "${SEDARGS[@]}" "$BUFFER" > "$BUFFER.sed" || die 3 "--sed expression failed"
+	# a non-interactive -s that matches nothing is almost certainly a typo,
+	# and applying the unedited buffer would duplicate the change verbatim
+	if [ -z "$DO_EDIT" ] && cmp -s "$BUFFER" "$BUFFER.sed"; then
+		rm -f "$BUFFER.sed"
+		die 1 "the --sed expression(s) matched nothing; refusing to duplicate verbatim (use --edit to review)"
+	fi
+	mv "$BUFFER.sed" "$BUFFER"
+fi
+
+NEED_EDITOR=1
+[ ${#SEDEXPRS[@]} -gt 0 ] && [ -z "$DO_EDIT" ] && NEED_EDITOR=
+
+if [ -n "$NEED_EDITOR" ]; then
+	EDITOR_CMD=$(git var GIT_EDITOR) || die 3 "no editor configured (core.editor / GIT_EDITOR / EDITOR)"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. edit -> recount -> strict apply, with a retry loop
+#
+# The user's edits invalidate the @@ line counts, and `git apply --recount`
+# is not good enough: it fixes counts but leaves the +side start lines stale,
+# which misplaces every later hunk by the size of the edit. We recompute the
+# headers ourselves (start lines preserved, counts and +side starts rederived,
+# blank context lines restored to ' ', no-op hunks and empty sections dropped)
+# and then apply with no leniency flags at all.
+
+recount() {  # stdin: '#'-stripped patch, stdout: renumbered patch
+	awk '
+		function flushhunk(   b2, d2, c2) {
+			if (!inh) return
+			inh = 0
+			if (hadd + hdel == 0) return
+			b2 = hctx + hdel; d2 = hctx + hadd
+			if (b2 == 0) c2 = ha + delta + 1
+			else if (d2 == 0) c2 = ha + delta - 1
+			else c2 = ha + delta
+			secbuf = secbuf sprintf("@@ -%d,%d +%d,%d @@%s\n", ha, b2, c2, d2, htail) hbuf
+			seckept++
+			delta += hadd - hdel
+		}
+		function flushsec() {
+			flushhunk()
+			if (seckept > 0) printf "%s", sechdr secbuf
+			sechdr = ""; secbuf = ""; seckept = 0; delta = 0; insec = 0
+		}
+		/^diff --git / { flushsec(); insec = 1; inhead = 1; sechdr = $0 "\n"; next }
+		!insec { bad = 1; exit }
+		/^@@ / {
+			flushhunk(); inhead = 0; inh = 1
+			a = $2; sub(/^-/, "", a); sub(/,.*/, "", a); ha = a + 0
+			t = $0; sub(/^@@ [^@]*@@/, "", t); htail = t
+			hctx = 0; hadd = 0; hdel = 0; hbuf = ""
+			next
+		}
+		{
+			if (inhead) { sechdr = sechdr $0 "\n"; next }
+			if (!inh) { bad = 1; exit }
+			c = substr($0, 1, 1)
+			if ($0 == "")      { hbuf = hbuf " \n"; hctx++ }   # blank-stripped context line
+			else if (c == " ")  { hbuf = hbuf $0 "\n"; hctx++ }
+			else if (c == "-")  { hbuf = hbuf $0 "\n"; hdel++ }
+			else if (c == "+")  { hbuf = hbuf $0 "\n"; hadd++ }
+			else if (c == "\\") { hbuf = hbuf $0 "\n" }
+			else { bad = 1; exit }
+		}
+		END { if (bad) exit 65; flushsec() }
+	'
+}
+
+while :; do
+	if [ -n "$NEED_EDITOR" ]; then
+		eval "$EDITOR_CMD" '"$BUFFER"' || die 2 "editor exited non-zero; nothing applied (buffer kept: $BUFFER)"
+	fi
+
+	grep -v '^#' "$BUFFER" > "$TMP/stripped"
+	if ! grep -q '^@@ ' "$TMP/stripped"; then
+		die 1 "empty patch, nothing applied"
+	fi
+	recount < "$TMP/stripped" > "$TMP/final.diff" \
+		|| die 3 "unparsable patch (stray line outside a hunk?); buffer kept: $BUFFER"
+	grep -q '^@@ ' "$TMP/final.diff" || die 1 "no hunks left, nothing applied"
+
+	APPLY=(apply --whitespace=nowarn)
+	[ -n "$DO_CHECK" ] && APPLY=(apply --check --whitespace=nowarn)
+	if git -C "$TOP" "${APPLY[@]}" "$TMP/final.diff" 2>"$TMP/apply.err"; then
+		break
+	fi
+
+	if [ -z "$NEED_EDITOR" ]; then
+		warn "patch does not apply:"
+		sed 's/^/    /' "$TMP/apply.err" >&2
+		die 2 "nothing applied (buffer kept: $BUFFER)"
+	fi
+	# preserve the user's edits under a fresh header carrying the error
+	cp "$TMP/stripped" "$TMP/body.diff"; : > "$TMP/commented"
+	write_buffer "$TMP/apply.err"
+done
+
+# ---------------------------------------------------------------------------
+# 6. report
+
+cp "$TMP/final.diff" "$APPLIED"
+
+if [ -n "$DO_CHECK" ]; then
+	say "patch applies cleanly (--check: nothing written; patch kept: $APPLIED)"
+	[ -n "$QUIET" ] || git -C "$TOP" apply --stat "$TMP/final.diff" | sed 's/^/  /'
+	exit 0
+fi
+
+say "repatched $LABEL -> working tree (unstaged)"
+if [ -z "$QUIET" ]; then
+	git -C "$TOP" apply --stat "$TMP/final.diff" | sed 's/^/  /'
+	printf '  review: git diff        undo: git checkout -p        patch: %s\n' "$APPLIED"
+fi
+exit 0
