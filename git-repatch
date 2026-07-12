@@ -47,8 +47,9 @@ source (default: HEAD)
 
 options
   -s, --sed EXPR   sed s/pat/repl/[flags] applied to the seeded '+' lines
-                   only (repeatable); skips the editor unless --edit
-      --edit       open the editor even when -s is given
+                   only (repeatable) before the editor opens
+      --no-edit    skip the editor and apply the buffer as-is (without -s
+                   that duplicates the change verbatim)
   -U, --unified N  context lines shown around each change (default 3); the
                    innermost 3 anchor the apply, the rest are '#c' comments
   -q, --quiet      suppress the report
@@ -68,7 +69,7 @@ EOF
 # args
 
 SOURCE=HEAD; KIND=rev; SEEN_SRC=
-SEDEXPRS=(); DO_EDIT=; QUIET=; UCTX=3
+SEDEXPRS=(); NO_EDIT=; QUIET=; UCTX=3
 PATHSPEC=()
 
 while [ $# -gt 0 ]; do
@@ -84,7 +85,7 @@ while [ $# -gt 0 ]; do
 		UCTX=$2; shift ;;
 	-U*)               UCTX=${1#-U} ;;
 	--unified=*)       UCTX=${1#--unified=} ;;
-	--edit)            DO_EDIT=1 ;;
+	--no-edit)         NO_EDIT=1 ;;
 	-q|--quiet)        QUIET=1 ;;
 	--)                shift; while [ $# -gt 0 ]; do PATHSPEC[${#PATHSPEC[@]}]=$1; shift; done; break ;;
 	-*)                die 3 "unknown option: $1 (try --help)" ;;
@@ -412,17 +413,14 @@ if [ ${#SEDEXPRS[@]} -gt 0 ]; then
 	sed "${SEDARGS[@]}" "$BUFFER" > "$BUFFER.sed" || die 3 "--sed expression failed"
 	# a non-interactive -s that matches nothing is almost certainly a typo,
 	# and applying the unedited buffer would duplicate the change verbatim
-	if [ -z "$DO_EDIT" ] && cmp -s "$BUFFER" "$BUFFER.sed"; then
+	if [ -n "$NO_EDIT" ] && cmp -s "$BUFFER" "$BUFFER.sed"; then
 		rm -f "$BUFFER.sed"
-		die 1 "the --sed expression(s) matched nothing; refusing to duplicate verbatim (use --edit to review)"
+		die 1 "the --sed expression(s) matched nothing; refusing to duplicate verbatim (drop --no-edit to review)"
 	fi
 	mv "$BUFFER.sed" "$BUFFER"
 fi
 
-NEED_EDITOR=1
-[ ${#SEDEXPRS[@]} -gt 0 ] && [ -z "$DO_EDIT" ] && NEED_EDITOR=
-
-if [ -n "$NEED_EDITOR" ]; then
+if [ -z "$NO_EDIT" ]; then
 	EDITOR_CMD=$(git var GIT_EDITOR) || die 3 "no editor configured (core.editor / GIT_EDITOR / EDITOR)"
 fi
 
@@ -480,7 +478,7 @@ recount() {  # stdin: '#'-stripped patch, stdout: renumbered patch
 }
 
 while :; do
-	if [ -n "$NEED_EDITOR" ]; then
+	if [ -z "$NO_EDIT" ]; then
 		eval "$EDITOR_CMD" '"$BUFFER"' || die 2 "editor exited non-zero; nothing applied (buffer kept: $BUFFER)"
 	fi
 
@@ -496,7 +494,7 @@ while :; do
 		break
 	fi
 
-	if [ -z "$NEED_EDITOR" ]; then
+	if [ -n "$NO_EDIT" ]; then
 		warn "patch does not apply:"
 		sed 's/^/    /' "$TMP/apply.err" >&2
 		die 2 "nothing applied (buffer kept: $BUFFER)"

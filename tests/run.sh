@@ -77,7 +77,7 @@ SEDR='s/foo_retry = 3/bar_retry = 6/'
 
 # --- 1: dup single lines via -s ---------------------------------------------
 
-make_repo "$WORK/t1"; ( cd "$WORK/t1" && "$TOOL" -q -s "$SEDT" -s "$SEDR" )
+make_repo "$WORK/t1"; ( cd "$WORK/t1" && "$TOOL" -q --no-edit -s "$SEDT" -s "$SEDR" )
 is "dup: exit code" "$?" 0
 is "dup: a.py placement (timeout)" "$(line "$WORK/t1/a.py" 4)" "bar_timeout = 10"
 is "dup: a.py placement (retry)"   "$(line "$WORK/t1/a.py" 9)" "    bar_retry = 6"
@@ -87,7 +87,7 @@ is "dup: index untouched" "$(git -C "$WORK/t1" status --porcelain | sort | tr -d
 # --- 2: multi-line block stays contiguous, after the original ---------------
 
 make_block_repo "$WORK/t2"
-( cd "$WORK/t2" && "$TOOL" -q -s 's/foo_setup/bar_setup/' -s 's/f\([ab]\) =/b\1 =/' -s 's/fa + fb/ba + bb/' )
+( cd "$WORK/t2" && "$TOOL" -q --no-edit -s 's/foo_setup/bar_setup/' -s 's/f\([ab]\) =/b\1 =/' -s 's/fa + fb/ba + bb/' )
 is "block: exit code" "$?" 0
 is "block: first dup line right after original block" "$(line "$WORK/t2/a.py" 9)" "def bar_setup():"
 is "block: contiguous" "$(sed -n '9,12p' "$WORK/t2/a.py" | tr '\n' '|')" \
@@ -114,7 +114,7 @@ make_repo "$WORK/t4"
 	&& git reset -q --hard base \
 	&& ins after 'import sys' 'foo_timeout = 5' a.py \
 	&& git add a.py \
-	&& "$TOOL" -q --staged -s "$SEDT" )
+	&& "$TOOL" -q --no-edit --staged -s "$SEDT" )
 is "staged: exit code" "$?" 0
 is "staged: placement" "$(line "$WORK/t4/a.py" 4)" "bar_timeout = 10"
 is "staged: status" "$(git -C "$WORK/t4" status --porcelain)" "MM a.py"
@@ -122,9 +122,9 @@ is "staged: status" "$(git -C "$WORK/t4" status --porcelain)" "MM a.py"
 # --- 5: stacking a third variant via git add -u + --staged -------------------
 
 make_repo "$WORK/t5"
-( cd "$WORK/t5" && "$TOOL" -q -s "$SEDT" -s "$SEDR" \
+( cd "$WORK/t5" && "$TOOL" -q --no-edit -s "$SEDT" -s "$SEDR" \
 	&& git add -u \
-	&& "$TOOL" -q --staged -s 's/bar_\(.*\) = .*/baz_\1 = 99/' )
+	&& "$TOOL" -q --no-edit --staged -s 's/bar_\(.*\) = .*/baz_\1 = 99/' )
 is "stack: exit code" "$?" 0
 is "stack: foo,bar,baz in order" "$(sed -n '3,5p' "$WORK/t5/a.py" | tr '\n' '|')" \
 	"foo_timeout = 5|bar_timeout = 10|baz_timeout = 99|"
@@ -132,7 +132,7 @@ is "stack: foo,bar,baz in order" "$(sed -n '3,5p' "$WORK/t5/a.py" | tr '\n' '|')
 # --- 6: change absent from the tree is refused with guidance ------------------
 
 make_repo "$WORK/t6"
-err=$( cd "$WORK/t6" && git checkout -q base && "$TOOL" -q foo -s "$SEDT" 2>&1 )
+err=$( cd "$WORK/t6" && git checkout -q base && "$TOOL" -q --no-edit foo -s "$SEDT" 2>&1 )
 is "absent: exit code" "$?" 2
 case "$err" in *absent*) ok "absent: explained" ;; *) bad "absent: explained ($err)" ;; esac
 clean_tree "$WORK/t6" && ok "absent: tree untouched" || bad "absent: tree untouched"
@@ -160,22 +160,22 @@ clean_tree "$WORK/t8" && ok "mangle: nothing written" || bad "mangle: nothing wr
 # --- 9: invoked from a subdirectory ------------------------------------------
 
 make_repo "$WORK/t9"
-( cd "$WORK/t9" && mkdir -p sub && cd sub && "$TOOL" -q -s "$SEDT" -s "$SEDR" )
+( cd "$WORK/t9" && mkdir -p sub && cd sub && "$TOOL" -q --no-edit -s "$SEDT" -s "$SEDR" )
 is "subdir: exit code" "$?" 0
 is "subdir: applied at toplevel" "$(line "$WORK/t9/a.py" 4)" "bar_timeout = 10"
 
 # --- 10: pathspec limiting ----------------------------------------------------
 
 make_repo "$WORK/t10"
-( cd "$WORK/t10" && "$TOOL" -q -s "$SEDT" -s "$SEDR" -- a.py )
+( cd "$WORK/t10" && "$TOOL" -q --no-edit -s "$SEDT" -s "$SEDR" -- a.py )
 is "pathspec: exit code" "$?" 0
 is "pathspec: a.py changed" "$(git -C "$WORK/t10" status --porcelain)" " M a.py"
 
 # --- 11: repatching the same commit twice is refused with guidance -----------
 
 make_repo "$WORK/t11"
-( cd "$WORK/t11" && "$TOOL" -q -s "$SEDT" -s "$SEDR" )
-err=$( cd "$WORK/t11" && "$TOOL" -q -s "$SEDT" 2>&1 )
+( cd "$WORK/t11" && "$TOOL" -q --no-edit -s "$SEDT" -s "$SEDR" )
+err=$( cd "$WORK/t11" && "$TOOL" -q --no-edit -s "$SEDT" 2>&1 )
 is "twice: exit code" "$?" 2
 case "$err" in *--staged*) ok "twice: error suggests --staged" ;; *) bad "twice: error suggests --staged ($err)" ;; esac
 
@@ -219,7 +219,7 @@ make_repo "$WORK/t15"
 	&& printf '\000\001\002' > blob.bin && git add blob.bin \
 	&& sedi 's/^    return x$/    return x  # tagged/' a.py && git add a.py \
 	&& git commit -qm 'binary + text' )
-( cd "$WORK/t15" && "$TOOL" -q -s 's/# tagged/# tagged twice/' 2>/dev/null )
+( cd "$WORK/t15" && "$TOOL" -q --no-edit -s 's/# tagged/# tagged twice/' 2>/dev/null )
 is "binary: exit code" "$?" 0
 is "binary: text dup applied" "$(git -C "$WORK/t15" status --porcelain)" " M a.py"
 
@@ -241,7 +241,7 @@ is "no changes: exit code" "$?" 1
 git init -q "$WORK/t18" && ( cd "$WORK/t18" \
 	&& printf 'import os\nfoo_a = 1' > f.py && git add . && git commit -qm one \
 	&& printf 'import os\nfoo_mid = 5\nfoo_a = 1' > f.py && git commit -qam two )
-( cd "$WORK/t18" && "$TOOL" -q -s 's/foo_mid = 5/bar_mid = 6/' )
+( cd "$WORK/t18" && "$TOOL" -q --no-edit -s 's/foo_mid = 5/bar_mid = 6/' )
 is "no-newline: exit code" "$?" 0
 is "no-newline: placement" "$(line "$WORK/t18/f.py" 3)" "bar_mid = 6"
 [ -n "$(tail -c1 "$WORK/t18/f.py")" ] \
@@ -252,15 +252,15 @@ is "no-newline: placement" "$(line "$WORK/t18/f.py" 3)" "bar_mid = 6"
 git init -q "$WORK/t19" && ( cd "$WORK/t19" \
 	&& printf 'a\nb' > f.txt && git add . && git commit -qm one \
 	&& printf 'a\nb\nc' > f.txt && git commit -qam two )
-err=$( cd "$WORK/t19" && "$TOOL" -q -s 's/c/d/' 2>&1 )
+err=$( cd "$WORK/t19" && "$TOOL" -q --no-edit -s 's/c/d/' 2>&1 )
 is "eof-no-newline: exit code" "$?" 1
 case "$err" in *"trailing newline"*) ok "eof-no-newline: note surfaced" ;; *) bad "eof-no-newline: note surfaced ($err)" ;; esac
 clean_tree "$WORK/t19" && ok "eof-no-newline: tree untouched" || bad "eof-no-newline: tree untouched"
 
-# --- 20: -s that matches nothing is refused (typo guard) ----------------------
+# --- 20: --no-edit -s that matches nothing is refused (typo guard) ------------
 
 make_repo "$WORK/t20"
-err=$( cd "$WORK/t20" && "$TOOL" -q -s 's/NO_SUCH_THING/x/' 2>&1 )
+err=$( cd "$WORK/t20" && "$TOOL" -q --no-edit -s 's/NO_SUCH_THING/x/' 2>&1 )
 is "noop-sed: exit code" "$?" 1
 case "$err" in *"matched nothing"*) ok "noop-sed: explained" ;; *) bad "noop-sed: explained ($err)" ;; esac
 clean_tree "$WORK/t20" && ok "noop-sed: tree untouched" || bad "noop-sed: tree untouched"
@@ -284,7 +284,7 @@ is "unified: 3 '#c' lines each side" "$(grep -c '^#c' "$WORK/t21.buffer")" 6
 is "unified: first '#c' line" "$(grep -m1 '^#c' "$WORK/t21.buffer")" "#c l2"
 ( cd "$WORK/t21" && GIT_EDITOR="$WORK/ed21" "$TOOL" -q 2>/dev/null )
 is "unified: default buffer has no '#c'" "$(grep -c '^#c' "$WORK/t21.buffer")" 0
-( cd "$WORK/t21" && "$TOOL" -q -U9 -s 's/foo_x = 1/bar_x = 2/' )
+( cd "$WORK/t21" && "$TOOL" -q --no-edit -U9 -s 's/foo_x = 1/bar_x = 2/' )
 is "unified: -U9 end-to-end exit code" "$?" 0
 is "unified: -U9 placement" "$(line "$WORK/t21/f.txt" 9)" "bar_x = 2"
 
@@ -312,6 +312,28 @@ is "unified: -U2 refused" "$?" 3
 case "$err" in *"at least 3"*) ok "unified: -U2 explained" ;; *) bad "unified: -U2 explained ($err)" ;; esac
 err=$( cd "$WORK/t21" && "$TOOL" -q --unified=lots 2>&1 )
 is "unified: non-numeric refused" "$?" 3
+
+# --- 22: -s pre-seeds the buffer, then the editor still opens -----------------
+
+make_repo "$WORK/t22"
+cat > "$WORK/ed22" <<EOF
+#!/bin/sh
+cp "\$1" "$WORK/t22.buffer"
+EOF
+chmod +x "$WORK/ed22"
+( cd "$WORK/t22" && GIT_EDITOR="$WORK/ed22" "$TOOL" -q -s "$SEDT" -s "$SEDR" )
+is "sed+editor: exit code" "$?" 0
+grep -q '^+bar_timeout = 10$' "$WORK/t22.buffer" \
+	&& ok "sed+editor: buffer already sedded" || bad "sed+editor: buffer already sedded"
+is "sed+editor: applied after editor save" "$(line "$WORK/t22/a.py" 4)" "bar_timeout = 10"
+
+# --- 23: --no-edit without -s duplicates verbatim -----------------------------
+
+make_repo "$WORK/t23"
+( cd "$WORK/t23" && "$TOOL" -q --no-edit )
+is "no-edit: exit code" "$?" 0
+is "no-edit: verbatim duplicate" "$(sed -n '3,4p' "$WORK/t23/a.py" | tr '\n' '|')" \
+	"foo_timeout = 5|foo_timeout = 5|"
 
 # ------------------------------------------------------------------------------
 

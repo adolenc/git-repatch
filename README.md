@@ -10,7 +10,8 @@ right next to the original.
 
 ```
 $ git repatch                     # opens the last commit's change in $EDITOR
-$ git repatch -s 's/foo/bar/'     # same, non-interactive: sed the copy in
+$ git repatch -s 's/foo/bar/'     # same, with the copy already sedded
+$ git repatch -s 's/foo/bar/' --no-edit    # fully non-interactive
 ```
 
 HEAD and the index are never touched: the only output is unstaged
@@ -40,8 +41,9 @@ source (default: HEAD)
 
 options
   -s, --sed EXPR   sed s/pat/repl/[flags] applied to the seeded '+' lines
-                   only (repeatable); skips the editor unless --edit
-      --edit       open the editor even when -s is given
+                   only (repeatable) before the editor opens
+      --no-edit    skip the editor and apply the buffer as-is (without -s
+                   that duplicates the change verbatim)
   -U, --unified N  context lines shown around each change (default 3); the
                    innermost 3 anchor the apply, the rest are '#c' comments
   -q, --quiet      suppress the report
@@ -56,11 +58,11 @@ git repatch
 # last commit added foo_timeout everywhere; add bar_timeout too
 git repatch -s 's/foo_timeout = 5/bar_timeout = 10/'
 
-# same, but review/adjust in the editor first
-git repatch -s 's/foo/bar/' --edit
+# same, but skip the editor review
+git repatch -s 's/foo_timeout = 5/bar_timeout = 10/' --no-edit
 
 # stack a third variant on top of the previous repatch
-git add -u && git repatch --staged -s 's/bar/baz/'
+git add -u && git repatch --staged -s 's/bar/baz/' --no-edit
 
 # replay one commit's change, editing as you go, in src/ only
 git repatch HEAD~3 -- src/
