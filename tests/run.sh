@@ -272,26 +272,51 @@ is "noop-sed: exit code" "$?" 1
 case "$err" in *"matched nothing"*) ok "noop-sed: explained" ;; *) bad "noop-sed: explained ($err)" ;; esac
 clean_tree "$WORK/t20" && ok "noop-sed: tree untouched" || bad "noop-sed: tree untouched"
 
-# --- 21: -U controls buffer context; the copy still lands right ---------------
+# --- 21: -U extra context is display-only '#c' lines --------------------------
 
-make_repo "$WORK/t21"
+git init -q "$WORK/t21" && ( cd "$WORK/t21" \
+	&& printf 'l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\n' > f.txt \
+	&& git add . && git commit -qm base \
+	&& ins after 'l7' 'foo_x = 1' f.txt \
+	&& git commit -qam 'add foo_x' )
 cat > "$WORK/ed21" <<EOF
 #!/bin/sh
 cp "\$1" "$WORK/t21.buffer"
 : > "\$1"
 EOF
 chmod +x "$WORK/ed21"
-( cd "$WORK/t21" && GIT_EDITOR="$WORK/ed21" "$TOOL" -q -U1 2>/dev/null )
-# with 1 context line the two changes per file no longer merge into one hunk
-is "unified: dup -U1 hunk count" "$(grep -c '^@@ ' "$WORK/t21.buffer")" 4
-is "unified: dup -U1 first hunk" "$(grep -m1 '^@@ ' "$WORK/t21.buffer")" "@@ -2,3 +2,4 @@"
-( cd "$WORK/t21" && "$TOOL" -q --unified=1 -s "$SEDT" -s "$SEDR" )
-is "unified: -U1 end-to-end exit code" "$?" 0
-is "unified: -U1 placement" "$(line "$WORK/t21/a.py" 4)" "bar_timeout = 10"
+( cd "$WORK/t21" && GIT_EDITOR="$WORK/ed21" "$TOOL" -q --unified=6 2>/dev/null )
+is "unified: live hunk unchanged by -U6" "$(grep -m1 '^@@ ' "$WORK/t21.buffer")" "@@ -5,7 +5,8 @@"
+is "unified: 3 '#c' lines each side" "$(grep -c '^#c' "$WORK/t21.buffer")" 6
+is "unified: first '#c' line" "$(grep -m1 '^#c' "$WORK/t21.buffer")" "#c l2"
+( cd "$WORK/t21" && GIT_EDITOR="$WORK/ed21" "$TOOL" -q 2>/dev/null )
+is "unified: default buffer has no '#c'" "$(grep -c '^#c' "$WORK/t21.buffer")" 0
+( cd "$WORK/t21" && "$TOOL" -q -U9 -s 's/foo_x = 1/bar_x = 2/' )
+is "unified: -U9 end-to-end exit code" "$?" 0
+is "unified: -U9 placement" "$(line "$WORK/t21/f.txt" 9)" "bar_x = 2"
 
-err=$( cd "$WORK/t21" && "$TOOL" -q -U 0 2>&1 )
-is "unified: -U0 refused" "$?" 3
-case "$err" in *"at least 1"*) ok "unified: -U0 explained" ;; *) bad "unified: -U0 explained ($err)" ;; esac
+# two changes far enough apart for separate hunks, close enough that their
+# -U9 comment windows collide: every file line must render exactly once
+git init -q "$WORK/t21b" && ( cd "$WORK/t21b" \
+	&& printf 'm1\nm2\nm3\nm4\nm5\nm6\nm7\nm8\nm9\nm10\nm11\nm12\nm13\nm14\nm15\nm16\nm17\nm18\nm19\nm20\n' > g.txt \
+	&& git add . && git commit -qm base \
+	&& ins after 'm4' 'foo_a = 1' g.txt \
+	&& ins after 'm12' 'foo_b = 1' g.txt \
+	&& git commit -qam 'two knobs' )
+cat > "$WORK/ed21b" <<EOF
+#!/bin/sh
+cp "\$1" "$WORK/t21b.buffer"
+: > "\$1"
+EOF
+chmod +x "$WORK/ed21b"
+( cd "$WORK/t21b" && GIT_EDITOR="$WORK/ed21b" "$TOOL" -q -U9 2>/dev/null )
+is "unified: hunks stay separate under -U9" "$(grep -c '^@@ ' "$WORK/t21b.buffer")" 2
+is "unified: no file line rendered twice" \
+	"$(sed -n 's/^#c //p;s/^ //p' "$WORK/t21b.buffer" | sort | uniq -d | wc -l | tr -d ' ')" 0
+
+err=$( cd "$WORK/t21" && "$TOOL" -q -U 2 2>&1 )
+is "unified: -U2 refused" "$?" 3
+case "$err" in *"at least 3"*) ok "unified: -U2 explained" ;; *) bad "unified: -U2 explained ($err)" ;; esac
 err=$( cd "$WORK/t21" && "$TOOL" -q --unified=lots 2>&1 )
 is "unified: non-numeric refused" "$?" 3
 

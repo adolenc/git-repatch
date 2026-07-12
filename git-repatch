@@ -49,7 +49,8 @@ options
   -s, --sed EXPR   sed s/pat/repl/[flags] applied to the seeded '+' lines
                    only (repeatable); skips the editor unless --edit
       --edit       open the editor even when -s is given
-  -U, --unified N  context lines around each change (default 3, minimum 1)
+  -U, --unified N  context lines shown around each change (default 3); the
+                   innermost 3 anchor the apply, the rest are '#c' comments
       --check      dry run: validate everything, write nothing
   -q, --quiet      suppress the report
   -h, --help       this
@@ -57,8 +58,9 @@ options
 In the editor: edit ONLY the '+' lines; context lines must keep matching your
 tree. Deleting a '+' line, a hunk, or a file section skips it. Changing a
 context line's leading ' ' to '-' deletes that line from your tree. Lines
-starting with '#' are ignored. An empty file aborts. Failed applies write
-nothing and reopen the editor with git's error message.
+starting with '#' are ignored ('#c' marks extra context from -U). An empty
+file aborts. Failed applies write nothing and reopen the editor with git's
+error message.
 EOF
 	exit 0
 }
@@ -97,7 +99,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$UCTX" in ''|*[!0-9]*) die 3 "--unified needs a number: '$UCTX'" ;; esac
-[ "$UCTX" -ge 1 ] || die 3 "--unified must be at least 1: a hunk with no context cannot anchor a strict apply"
+[ "$UCTX" -ge 3 ] || die 3 "--unified must be at least 3: each hunk keeps 3 live context lines to anchor the strict apply"
 
 # ---------------------------------------------------------------------------
 # environment
@@ -237,17 +239,20 @@ case $? in 0|1) ;; *) die 3 "internal: re-diff failed" ;; esac
 # re-diffed through git: rendering a self-adjacent duplication is
 # ambiguous (the diff "slider" problem) and git may rotate the copy
 # across the original, which would make the seeds straddle it.
+# Hunks always carry 3 live context lines; --unified beyond that is
+# rendered as '#c' display-only lines, stripped with the other comments.
 : > "$TMP/body.diff"
 awk -v CUR="$TMP/cur" -v BODY="$TMP/body.diff" -v COM="$TMP/commented" \
-    -v NOTES="$TMP/notes.dup" -v NONL="$TMP/nonl" -v U="$UCTX" '
+    -v NOTES="$TMP/notes.dup" -v NONL="$TMP/nonl" -v U=3 -v X="$((UCTX - 3))" '
 	BEGIN { while ((getline l < NONL) > 0) nonl[l] = 1; close(NONL) }
-	function flush(   f, ln, nl, r, gs, ge, nr, nls, nle, ls, le, ins, k, i, pre, delta, emitted) {
+	function cline(s) { return s == "" ? "#c" : "#c " s }
+	function flush(   f, ln, nl, r, gs, ge, nr, nls, nle, ls, le, ins, k, i, pre, delta, emitted, last, cs, ce) {
 		if (state == "normal" && nrun > 0) {
 			f = CUR "/" rel
 			nl = 0; split("", L)
 			while ((getline ln < f) > 0) L[++nl] = ln
 			close(f)
-			delta = 0; emitted = 0
+			delta = 0; emitted = 0; last = 0
 			r = 1
 			while (r <= nrun) {
 				if (runbad[r]) {
@@ -276,6 +281,9 @@ awk -v CUR="$TMP/cur" -v BODY="$TMP/body.diff" -v COM="$TMP/commented" \
 				}
 				pre = le - ls + 1
 				printf "@@ -%d,%d +%d,%d @@\n", ls, pre, ls + delta, pre + ins > BODY
+				cs = ls - X; if (cs < 1) cs = 1
+				if (cs <= last) cs = last + 1
+				for (i = cs; i < ls; i++) print cline(L[i]) > BODY
 				i = ls
 				for (k = gs; k <= ge; k++) {
 					while (i <= runend[k]) { print " " L[i] > BODY; i++ }
@@ -290,6 +298,15 @@ awk -v CUR="$TMP/cur" -v BODY="$TMP/body.diff" -v COM="$TMP/commented" \
 						print "\\ No newline at end of file" > BODY
 					i++
 				}
+				last = le
+				ce = le + X; if (ce > nl) ce = nl
+				# stop short of the next hunk: its own window renders those lines
+				if (ge + 1 <= nrun && !runbad[ge + 1]) {
+					nls = runstart[ge + 1] - U
+					if (ce >= nls) ce = nls - 1
+				}
+				for (i = le + 1; i <= ce; i++) print cline(L[i]) > BODY
+				if (ce > last) last = ce
 				delta += ins
 				r = ge + 1
 			}
@@ -375,6 +392,8 @@ write_buffer() {  # $1 = path of an error file to quote, or ""
 # Drop a '+' line / hunk / file section to skip it. '#' lines are ignored.
 # Save and quit to apply to the working tree; an empty file aborts.
 EOF
+		grep -q '^#c' "$TMP/body.diff" \
+			&& printf "# '#c' lines are extra context (--unified): display only, ignored on apply.\n"
 		[ -s "$TMP/notes" ]     && { printf '#\n'; cat "$TMP/notes"; }
 		[ -s "$TMP/notes.dup" ] && { printf '#\n'; cat "$TMP/notes.dup"; }
 		cat "$TMP/body.diff"
