@@ -29,14 +29,13 @@ chmod +x /usr/local/bin/git-repatch
 ## Usage
 
 ```
-git repatch [<rev> | <rev>..<rev> | --staged | --worktree]
+git repatch [<rev> | <rev>..<rev> | --staged]
             [options] [--] [<pathspec>...]
 
 source (default: HEAD)
   <rev>            that commit's diff          e.g. git repatch HEAD~2
   <rev>..<rev>     a range's cumulative diff   e.g. git repatch main..topic
   --staged         the index vs HEAD
-  --worktree       all uncommitted changes vs HEAD
   -- <pathspec>    limit the source diff to these paths
 
 options
@@ -77,14 +76,14 @@ nothing and reopens the editor with git's error message.
 ## Examples
 
 ```sh
-# yesterday's commit added foo_timeout everywhere; add bar_timeout too
+# last commit added foo_timeout everywhere; add bar_timeout too
 git repatch -s 's/foo_timeout = 5/bar_timeout = 10/'
 
 # same, but review/adjust in the editor first
 git repatch -s 's/foo/bar/' --edit
 
 # stack a third variant on top of the previous repatch
-git repatch --worktree -s 's/bar/baz/'
+git add -u && git repatch --staged -s 's/bar/baz/'
 
 # replay one commit's change, editing as you go, in src/ only
 git repatch HEAD~3 -- src/
@@ -118,8 +117,8 @@ of the file. So `git repatch` only ever does strict applies:
 ## Caveats
 
 - Repatching the *same commit* twice fails the presence probe (your first
-  copy now sits inside the original's context). That's what `--worktree` is
-  for: repatch the uncommitted result instead.
+  copy now sits inside the original's context). Stage the copy and repatch
+  that instead: `git add -u && git repatch --staged`.
 - Files *created* by the source can't be duplicated onto themselves; they
   appear as a commented-out section - uncomment and change the path to
   create a sibling file. Deletions, binaries and submodules are skipped with

@@ -100,18 +100,19 @@ is "recount: later hunk not shifted" "$(line "$WORK/t3/a.py" 16)" "    bar_retry
 make_repo "$WORK/t4"
 ( cd "$WORK/t4" \
 	&& git reset -q --hard base \
-	&& sed -i 's/^import sys$/import sys\nfoo_timeout = 5/' a.py \
+	&& ins after 'import sys' 'foo_timeout = 5' a.py \
 	&& git add a.py \
 	&& "$TOOL" -q --staged -s "$SEDT" )
 is "staged: exit code" "$?" 0
 is "staged: placement" "$(line "$WORK/t4/a.py" 4)" "bar_timeout = 10"
 is "staged: status" "$(git -C "$WORK/t4" status --porcelain)" "MM a.py"
 
-# --- 5: stacking a third variant via --worktree ------------------------------
+# --- 5: stacking a third variant via git add -u + --staged -------------------
 
 make_repo "$WORK/t5"
 ( cd "$WORK/t5" && "$TOOL" -q -s "$SEDT" -s "$SEDR" \
-	&& "$TOOL" -q --worktree -s 's/bar_\(.*\) = .*/baz_\1 = 99/' )
+	&& git add -u \
+	&& "$TOOL" -q --staged -s 's/bar_\(.*\) = .*/baz_\1 = 99/' )
 is "stack: exit code" "$?" 0
 is "stack: foo,bar,baz in order" "$(sed -n '3,5p' "$WORK/t5/a.py" | tr '\n' '|')" \
 	"foo_timeout = 5|bar_timeout = 10|baz_timeout = 99|"
@@ -164,7 +165,7 @@ make_repo "$WORK/t11"
 ( cd "$WORK/t11" && "$TOOL" -q -s "$SEDT" -s "$SEDR" )
 err=$( cd "$WORK/t11" && "$TOOL" -q -s "$SEDT" 2>&1 )
 is "twice: exit code" "$?" 2
-case "$err" in *--worktree*) ok "twice: error suggests --worktree" ;; *) bad "twice: error suggests --worktree ($err)" ;; esac
+case "$err" in *--staged*) ok "twice: error suggests --staged" ;; *) bad "twice: error suggests --staged ($err)" ;; esac
 
 # --- 12: file created by the source: note + commented section, rest works ----
 
@@ -227,7 +228,7 @@ case "$out" in *"usage: git repatch"*) ok "git repatch -h: usage shown" ;; *) ba
 # --- 17: no changes -> exit 1 ---------------------------------------------------
 
 make_repo "$WORK/t17"
-( cd "$WORK/t17" && "$TOOL" -q --worktree 2>/dev/null )
+( cd "$WORK/t17" && "$TOOL" -q --staged 2>/dev/null )
 is "no changes: exit code" "$?" 1
 
 # --- 18: file without trailing newline: mid-file dup works --------------------

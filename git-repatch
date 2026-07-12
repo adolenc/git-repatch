@@ -27,7 +27,7 @@ say()  { [ -n "$QUIET" ] || printf '%s\n' "$*"; }
 
 usage() {
 	cat <<'EOF'
-usage: git repatch [<rev> | <rev>..<rev> | --staged | --worktree]
+usage: git repatch [<rev> | <rev>..<rev> | --staged]
                    [options] [--] [<pathspec>...]
 
 Turn a change into an editable patch, open it in your editor, and strictly
@@ -44,8 +44,6 @@ source (default: HEAD)
   <rev>            that commit's diff          e.g. git repatch HEAD~2
   <rev>..<rev>     a range's cumulative diff   e.g. git repatch main..topic
   --staged         the index vs HEAD
-  --worktree       all uncommitted changes vs HEAD (use this to stack a
-                   third variant on top of a previous repatch)
   -- <pathspec>    limit the source diff to these paths
 
 options
@@ -77,7 +75,6 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	-h|--help)         usage ;;
 	--staged|--cached) KIND=staged; SEEN_SRC=1 ;;
-	--worktree|--dirty) KIND=worktree; SEEN_SRC=1 ;;
 	-s|--sed)
 		[ $# -ge 2 ] || die 3 "$1 needs an argument"
 		case "$2" in s*) ;; *) die 3 "--sed expression must be a sed s command: $2" ;; esac
@@ -133,9 +130,6 @@ range)
 staged)
 	LABEL="staged changes"
 	GENCMD=(diff --cached) ;;
-worktree)
-	LABEL="uncommitted changes"
-	GENCMD=(diff HEAD) ;;
 esac
 
 git "${HARDEN[@]}" "${GENCMD[@]}" "${DIFFOPTS[@]}" \
@@ -188,8 +182,8 @@ else
 		printf 'from your working tree, so an edited copy has no safe place to land.\n'
 		printf 'likely causes:\n'
 		printf '  - you already repatched this source once (the copy now sits inside the\n'
-		printf "    original's context). repatch the uncommitted result instead:\n"
-		printf '        git repatch --worktree\n'
+		printf "    original's context). stage the copy and repatch that instead:\n"
+		printf '        git add -u && git repatch --staged\n'
 		printf '  - uncommitted edits overlap the source change: commit or stash them first\n'
 		printf '  - the source commit is older history that later commits reworked\n'
 		printf 'git said (probing for the change with `git apply -R --check`):\n'
