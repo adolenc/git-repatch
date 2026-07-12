@@ -44,7 +44,6 @@ options
       --edit       open the editor even when -s is given
   -U, --unified N  context lines shown around each change (default 3); the
                    innermost 3 anchor the apply, the rest are '#c' comments
-      --check      dry run: validate everything, write nothing
   -q, --quiet      suppress the report
 ```
 

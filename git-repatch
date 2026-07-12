@@ -51,7 +51,6 @@ options
       --edit       open the editor even when -s is given
   -U, --unified N  context lines shown around each change (default 3); the
                    innermost 3 anchor the apply, the rest are '#c' comments
-      --check      dry run: validate everything, write nothing
   -q, --quiet      suppress the report
   -h, --help       this
 
@@ -69,7 +68,7 @@ EOF
 # args
 
 SOURCE=HEAD; KIND=rev; SEEN_SRC=
-SEDEXPRS=(); DO_EDIT=; DO_CHECK=; QUIET=; UCTX=3
+SEDEXPRS=(); DO_EDIT=; QUIET=; UCTX=3
 PATHSPEC=()
 
 while [ $# -gt 0 ]; do
@@ -86,7 +85,6 @@ while [ $# -gt 0 ]; do
 	-U*)               UCTX=${1#-U} ;;
 	--unified=*)       UCTX=${1#--unified=} ;;
 	--edit)            DO_EDIT=1 ;;
-	--check)           DO_CHECK=1 ;;
 	-q|--quiet)        QUIET=1 ;;
 	--)                shift; while [ $# -gt 0 ]; do PATHSPEC[${#PATHSPEC[@]}]=$1; shift; done; break ;;
 	-*)                die 3 "unknown option: $1 (try --help)" ;;
@@ -494,9 +492,7 @@ while :; do
 		|| die 3 "unparsable patch (stray line outside a hunk?); buffer kept: $BUFFER"
 	grep -q '^@@ ' "$TMP/final.diff" || die 1 "no hunks left, nothing applied"
 
-	APPLY=(apply --whitespace=nowarn)
-	[ -n "$DO_CHECK" ] && APPLY=(apply --check --whitespace=nowarn)
-	if git -C "$TOP" "${APPLY[@]}" "$TMP/final.diff" 2>"$TMP/apply.err"; then
+	if git -C "$TOP" apply --whitespace=nowarn "$TMP/final.diff" 2>"$TMP/apply.err"; then
 		break
 	fi
 
@@ -514,12 +510,6 @@ done
 # 6. report
 
 cp "$TMP/final.diff" "$APPLIED"
-
-if [ -n "$DO_CHECK" ]; then
-	say "patch applies cleanly (--check: nothing written; patch kept: $APPLIED)"
-	[ -n "$QUIET" ] || git -C "$TOP" apply --stat "$TMP/final.diff" | sed 's/^/  /'
-	exit 0
-fi
 
 say "repatched $LABEL -> working tree (unstaged)"
 if [ -z "$QUIET" ]; then

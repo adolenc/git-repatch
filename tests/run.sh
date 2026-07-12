@@ -200,13 +200,6 @@ grep -q '^# diff --git a/util.py b/util.py' "$WORK/t12.buffer" \
 grep -q '^# +brand new' "$WORK/t12.buffer" \
 	&& ok "newfile: commented payload present" || bad "newfile: commented payload present"
 
-# --- 13: --check writes nothing -----------------------------------------------
-
-make_repo "$WORK/t13"
-( cd "$WORK/t13" && "$TOOL" -q --check -s "$SEDT" -s "$SEDR" )
-is "check: exit code" "$?" 0
-clean_tree "$WORK/t13" && ok "check: tree untouched" || bad "check: tree untouched"
-
 # --- 14: merge commits are refused ---------------------------------------------
 
 make_repo "$WORK/t14"
