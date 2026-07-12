@@ -20,6 +20,18 @@ is()   { # is <desc> <actual> <expected>
 }
 line() { sed -n "$2p" "$1"; }
 clean_tree() { [ -z "$(git -C "$1" status --porcelain)" ]; }
+sedi() { # in-place sed, portably (BSD sed's -i wants a suffix argument)
+	local e=$1 f; shift
+	for f in "$@"; do sed "$e" "$f" > "$f.sedi" && mv "$f.sedi" "$f"; done
+}
+ins() { # ins before|after <exact line> <text, \n for multi-line> <file>...
+	local m=$1 p=$2 t=$3 f; shift 3  # awk -v expands the \n escapes
+	for f in "$@"; do
+		awk -v m="$m" -v p="$p" -v t="$t" \
+			'$0 == p && m == "before" { print t } { print } $0 == p && m == "after" { print t }' \
+			"$f" > "$f.ins" && mv "$f.ins" "$f"
+	done
+}
 
 # --- fixtures ---------------------------------------------------------------
 
@@ -36,8 +48,8 @@ make_repo() { # $1: dir. base commit + "add foo knobs" commit (2 hunks x 2 files
 	EOF
 	cp a.py b.py
 	git add . && git commit -qm base && git tag base
-	sed -i 's/^import sys$/import sys\nfoo_timeout = 5/' a.py b.py
-	sed -i 's/^    x = 1$/    x = 1\n    foo_retry = 3/' a.py b.py
+	ins after 'import sys' 'foo_timeout = 5' a.py b.py
+	ins after '    x = 1' '    foo_retry = 3' a.py b.py
 	git add . && git commit -qm 'add foo knobs' && git tag foo
 	cd - >/dev/null || exit 1
 }
@@ -54,8 +66,8 @@ make_block_repo() { # $1: dir. base + commit adding a 5-line block and one line
 	    return x
 	EOF
 	git add . && git commit -qm base && git tag base
-	sed -i 's/^def main():$/def foo_setup():\n    fa = 1\n    fb = 2\n    return fa + fb\n\ndef main():/' a.py
-	sed -i 's/^    x = 1$/    x = 1\n    foo_retry = 3/' a.py
+	ins before 'def main():' 'def foo_setup():\n    fa = 1\n    fb = 2\n    return fa + fb\n' a.py
+	ins after '    x = 1' '    foo_retry = 3' a.py
 	git add . && git commit -qm 'add foo block' && git tag foo
 	cd - >/dev/null || exit 1
 }
@@ -86,7 +98,7 @@ is "block: contiguous" "$(sed -n '9,12p' "$WORK/t2/a.py" | tr '\n' '|')" \
 make_block_repo "$WORK/t3"
 cat > "$WORK/ed3" <<'EOF'
 #!/bin/sh
-sed -i -e '/^+    fb = 2$/d' -e '/^+/{/^+++ /!s/foo_/bar_/;}' "$1"
+sed -e '/^+    fb = 2$/d' -e '/^+/{/^+++ /!s/foo_/bar_/;}' "$1" > "$1.n" && mv "$1.n" "$1"
 EOF
 chmod +x "$WORK/ed3"
 ( cd "$WORK/t3" && GIT_EDITOR="$WORK/ed3" "$TOOL" -q )
@@ -138,7 +150,7 @@ clean_tree "$WORK/t7" && ok "abort: tree untouched" || bad "abort: tree untouche
 make_repo "$WORK/t8"
 cat > "$WORK/ed8" <<'EOF'
 #!/bin/sh
-if grep -q 'APPLY FAILED' "$1"; then : > "$1"; else sed -i 's/foo/bar/g' "$1"; fi
+if grep -q 'APPLY FAILED' "$1"; then : > "$1"; else sed 's/foo/bar/g' "$1" > "$1.n" && mv "$1.n" "$1"; fi
 EOF
 chmod +x "$WORK/ed8"
 ( cd "$WORK/t8" && GIT_EDITOR="$WORK/ed8" "$TOOL" -q 2>/dev/null )
@@ -172,7 +184,7 @@ case "$err" in *--staged*) ok "twice: error suggests --staged" ;; *) bad "twice:
 make_repo "$WORK/t12"
 ( cd "$WORK/t12" \
 	&& printf 'brand new\n' > util.py && git add util.py \
-	&& sed -i 's/^    return x$/    return x + 1/' a.py && git add a.py \
+	&& sedi 's/^    return x$/    return x + 1/' a.py && git add a.py \
 	&& git commit -qm 'new file + tweak' )
 cat > "$WORK/ed12" <<EOF
 #!/bin/sh
@@ -199,7 +211,7 @@ clean_tree "$WORK/t13" && ok "check: tree untouched" || bad "check: tree untouch
 
 make_repo "$WORK/t14"
 ( cd "$WORK/t14" \
-	&& git checkout -q -b side base && sed -i '1i # side' a.py && git commit -qam side \
+	&& git checkout -q -b side base && ins before 'import os' '# side' a.py && git commit -qam side \
 	&& git checkout -q master 2>/dev/null || git -C "$WORK/t14" checkout -q main \
 	&& true )
 ( cd "$WORK/t14" && git merge -q --no-edit side >/dev/null 2>&1 )
@@ -212,7 +224,7 @@ case "$err" in *"merge commit"*) ok "merge: explained" ;; *) bad "merge: explain
 make_repo "$WORK/t15"
 ( cd "$WORK/t15" \
 	&& printf '\000\001\002' > blob.bin && git add blob.bin \
-	&& sed -i 's/^    return x$/    return x  # tagged/' a.py && git add a.py \
+	&& sedi 's/^    return x$/    return x  # tagged/' a.py && git add a.py \
 	&& git commit -qm 'binary + text' )
 ( cd "$WORK/t15" && "$TOOL" -q -s 's/# tagged/# tagged twice/' 2>/dev/null )
 is "binary: exit code" "$?" 0
