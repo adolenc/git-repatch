@@ -318,6 +318,7 @@ is "unified: non-numeric refused" "$?" 3
 make_repo "$WORK/t22"
 cat > "$WORK/ed22" <<EOF
 #!/bin/sh
+echo \$# > "$WORK/t22.argc"
 cp "\$1" "$WORK/t22.buffer"
 touch "\$1"   # save without changes
 EOF
@@ -326,6 +327,7 @@ chmod +x "$WORK/ed22"
 is "sed+editor: exit code" "$?" 0
 grep -q '^+bar_timeout = 10$' "$WORK/t22.buffer" \
 	&& ok "sed+editor: buffer already sedded" || bad "sed+editor: buffer already sedded"
+[ -f "$WORK/t22.argc" ] && is "sed+editor: non-vim editor gets no extra args" "$(cat "$WORK/t22.argc")" 1
 is "sed+editor: applied after editor save" "$(line "$WORK/t22/a.py" 4)" "bar_timeout = 10"
 
 # --- 23: --no-edit without -s duplicates verbatim -----------------------------
@@ -355,6 +357,20 @@ chmod +x "$WORK/ed24b"
 ( cd "$WORK/t24" && GIT_EDITOR="$WORK/ed24b" "$TOOL" -q 2>/dev/null )
 is "unsaved retry: exit code" "$?" 1
 clean_tree "$WORK/t24" && ok "unsaved retry: tree untouched" || bad "unsaved retry: tree untouched"
+
+# --- 25: a vim-family editor is handed -c 'set modified' (pre-dirtying) -------
+
+make_repo "$WORK/t25"
+mkdir -p "$WORK/fakebin"
+cat > "$WORK/fakebin/nvim" <<'EOF'
+#!/bin/sh
+[ "$1" = "-c" ] && [ "$2" = "set modified" ] || exit 7
+touch "$3"   # a dirtied buffer means :x/ZZ write even with no edits
+EOF
+chmod +x "$WORK/fakebin/nvim"
+( cd "$WORK/t25" && GIT_EDITOR="$WORK/fakebin/nvim" "$TOOL" -q )
+is "vim dirty: exit code" "$?" 0
+is "vim dirty: verbatim duplicate applied" "$(line "$WORK/t25/a.py" 4)" "foo_timeout = 5"
 
 # ------------------------------------------------------------------------------
 

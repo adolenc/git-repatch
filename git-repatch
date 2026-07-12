@@ -389,7 +389,7 @@ write_buffer() {  # $1 = path of an error file to quote, or ""
 # apply fail (nothing is written on failure, and you get to retry).
 # To also delete an existing line, change its leading ' ' to '-'.
 # Drop a '+' line / hunk / file section to skip it. '#' lines are ignored.
-# Save and quit to apply to the working tree; quit without saving to abort.
+# Save and quit to apply to the working tree; quit without saving (:q!) aborts.
 EOF
 		grep -q '^#c' "$TMP/body.diff" \
 			&& printf "# '#c' lines are extra context (--unified): display only, ignored on apply.\n"
@@ -422,6 +422,10 @@ fi
 
 if [ -z "$NO_EDIT" ]; then
 	EDITOR_CMD=$(git var GIT_EDITOR) || die 3 "no editor configured (core.editor / GIT_EDITOR / EDITOR)"
+	# vim never writes an unmodified buffer on :x/ZZ, which would read as an
+	# abort below; pre-dirty the buffer so any save-exit writes. Only -c can
+	# do it: the stock ftplugin/diff.vim sets nomodeline on diff buffers.
+	case "${EDITOR_CMD%% *}" in *vim) EDITOR_CMD="$EDITOR_CMD -c 'set modified'" ;; esac
 	touch -t 200001010000 "$TMP/stamp"
 fi
 
