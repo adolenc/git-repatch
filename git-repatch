@@ -50,6 +50,7 @@ options
   -s, --sed EXPR   sed s/pat/repl/[flags] applied to the seeded '+' lines
                    only (repeatable); skips the editor unless --edit
       --edit       open the editor even when -s is given
+  -U, --unified N  context lines around each change (default 3, minimum 1)
       --plain      force plain mode (skip the presence probe)
       --check      dry run: validate everything, write nothing
   -q, --quiet      suppress the report
@@ -68,7 +69,7 @@ EOF
 # args
 
 SOURCE=HEAD; KIND=rev; SEEN_SRC=
-SEDEXPRS=(); DO_EDIT=; DO_PLAIN=; DO_CHECK=; QUIET=
+SEDEXPRS=(); DO_EDIT=; DO_PLAIN=; DO_CHECK=; QUIET=; UCTX=3
 PATHSPEC=()
 
 while [ $# -gt 0 ]; do
@@ -79,6 +80,11 @@ while [ $# -gt 0 ]; do
 		[ $# -ge 2 ] || die 3 "$1 needs an argument"
 		case "$2" in s*) ;; *) die 3 "--sed expression must be a sed s command: $2" ;; esac
 		SEDEXPRS[${#SEDEXPRS[@]}]=$2; shift ;;
+	-U|--unified)
+		[ $# -ge 2 ] || die 3 "$1 needs an argument"
+		UCTX=$2; shift ;;
+	-U*)               UCTX=${1#-U} ;;
+	--unified=*)       UCTX=${1#--unified=} ;;
 	--edit)            DO_EDIT=1 ;;
 	--plain)           DO_PLAIN=1 ;;
 	--check)           DO_CHECK=1 ;;
@@ -92,6 +98,9 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+
+case "$UCTX" in ''|*[!0-9]*) die 3 "--unified needs a number: '$UCTX'" ;; esac
+[ "$UCTX" -ge 1 ] || die 3 "--unified must be at least 1: a hunk with no context cannot anchor a strict apply"
 
 # ---------------------------------------------------------------------------
 # environment
@@ -111,7 +120,7 @@ APPLIED=$GITDIR/REPATCH.diff       # last successfully applied patch
 HARDEN=(-c color.ui=false -c core.quotePath=false -c diff.noprefix=false
         -c diff.mnemonicPrefix=false -c diff.external= -c diff.relative=false
         -c diff.suppressBlankEmpty=false)
-DIFFOPTS=(--patch --no-color --no-ext-diff --no-textconv --no-renames)
+DIFFOPTS=(--patch --no-color --no-ext-diff --no-textconv --no-renames -U"$UCTX")
 
 # ---------------------------------------------------------------------------
 # 1. generate the source patch
@@ -239,7 +248,7 @@ else
 	# across the original, which would make the seeds straddle it.
 	: > "$TMP/body.diff"
 	awk -v CUR="$TMP/cur" -v BODY="$TMP/body.diff" -v COM="$TMP/commented" \
-	    -v NOTES="$TMP/notes.dup" -v NONL="$TMP/nonl" -v U=3 '
+	    -v NOTES="$TMP/notes.dup" -v NONL="$TMP/nonl" -v U="$UCTX" '
 		BEGIN { while ((getline l < NONL) > 0) nonl[l] = 1; close(NONL) }
 		function flush(   f, ln, nl, r, gs, ge, nr, nls, nle, ls, le, ins, k, i, pre, delta, emitted) {
 			if (state == "normal" && nrun > 0) {

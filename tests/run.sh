@@ -272,6 +272,39 @@ is "noop-sed: exit code" "$?" 1
 case "$err" in *"matched nothing"*) ok "noop-sed: explained" ;; *) bad "noop-sed: explained ($err)" ;; esac
 clean_tree "$WORK/t20" && ok "noop-sed: tree untouched" || bad "noop-sed: tree untouched"
 
+# --- 21: -U controls buffer context; the copy still lands right ---------------
+
+make_repo "$WORK/t21"
+cat > "$WORK/ed21" <<EOF
+#!/bin/sh
+cp "\$1" "$WORK/t21.buffer"
+: > "\$1"
+EOF
+chmod +x "$WORK/ed21"
+( cd "$WORK/t21" && GIT_EDITOR="$WORK/ed21" "$TOOL" -q -U1 2>/dev/null )
+# with 1 context line the two changes per file no longer merge into one hunk
+is "unified: dup -U1 hunk count" "$(grep -c '^@@ ' "$WORK/t21.buffer")" 4
+is "unified: dup -U1 first hunk" "$(grep -m1 '^@@ ' "$WORK/t21.buffer")" "@@ -2,3 +2,4 @@"
+( cd "$WORK/t21" && "$TOOL" -q --unified=1 -s "$SEDT" -s "$SEDR" )
+is "unified: -U1 end-to-end exit code" "$?" 0
+is "unified: -U1 placement" "$(line "$WORK/t21/a.py" 4)" "bar_timeout = 10"
+
+make_repo "$WORK/t21p"
+cat > "$WORK/ed21p" <<EOF
+#!/bin/sh
+cp "\$1" "$WORK/t21p.buffer"
+: > "\$1"
+EOF
+chmod +x "$WORK/ed21p"
+( cd "$WORK/t21p" && git checkout -q base && GIT_EDITOR="$WORK/ed21p" "$TOOL" -q foo -U 1 2>/dev/null )
+is "unified: plain -U1 hunk count" "$(grep -c '^@@ ' "$WORK/t21p.buffer")" 4
+
+err=$( cd "$WORK/t21" && "$TOOL" -q -U0 2>&1 )
+is "unified: -U0 refused" "$?" 3
+case "$err" in *"at least 1"*) ok "unified: -U0 explained" ;; *) bad "unified: -U0 explained ($err)" ;; esac
+err=$( cd "$WORK/t21" && "$TOOL" -q --unified=lots 2>&1 )
+is "unified: non-numeric refused" "$?" 3
+
 # ------------------------------------------------------------------------------
 
 printf '\n%d tests, %d failed\n' "$N" "$FAILED"

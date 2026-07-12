@@ -42,6 +42,7 @@ options
   -s, --sed EXPR   sed s/pat/repl/[flags] applied to the seeded '+' lines
                    only (repeatable); skips the editor unless --edit
       --edit       open the editor even when -s is given
+  -U, --unified N  context lines around each change (default 3, minimum 1)
       --plain      force plain mode (skip the presence probe)
       --check      dry run: validate everything, write nothing
   -q, --quiet      suppress the report
