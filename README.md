@@ -2,11 +2,11 @@
 
 Replay an existing change through your editor into the working tree.
 
-You just made a project-wide change - added a config knob, a log line, a
-field - and now you need the *same lines again* with a different name.
-`git repatch` shows the change as a patch, you edit the `+` lines, and the
-edited copy lands in your working tree as unstaged changes, right next to the
-original.
+You just made a project-wide change and now you need to add the *same lines
+again* except slightly modified (e.g. a second variable at mostly the same
+places). `git repatch` shows the selected change as a patch, you edit the `+`
+lines, and the edited copy lands in your working tree as unstaged changes,
+right next to the original.
 
 ```
 $ git repatch                     # opens the last commit's change in $EDITOR
@@ -47,35 +47,12 @@ options
   -q, --quiet      suppress the report
 ```
 
-## Two modes, picked automatically
-
-**Duplicate mode** - the source change is already in your working tree (the
-usual case: you just committed it). The buffer shows the original change as
-context with a pre-seeded copy of every added block as `+` lines:
-
-```
- import sys
- foo_timeout = 5
-+foo_timeout = 5
- 
- def main():
-```
-
-Edit the copy (`:g/^+/s/foo/bar/g`), save, and the sibling change lands right
-after the original in every file.
-
-**Plain mode** - the source change is absent from your tree (an older commit,
-another branch). The buffer is the raw patch: cherry-pick with an edit step.
-
-In either mode: edit **only** the `+` lines - context lines must keep
-matching your tree. Deleting a `+` line, a hunk, or a file section skips it.
-Changing a context line's leading `' '` to `'-'` also deletes that line from
-your tree. `#` lines are ignored; an empty file aborts. A failed apply writes
-nothing and reopens the editor with git's error message.
-
 ## Examples
 
 ```sh
+# replay last commit's change, open the editor to adjust the copy
+git repatch
+
 # last commit added foo_timeout everywhere; add bar_timeout too
 git repatch -s 's/foo_timeout = 5/bar_timeout = 10/'
 
@@ -92,28 +69,6 @@ git repatch HEAD~3 -- src/
 git repatch main..topic
 ```
 
-## How it works (and why it never fuzzes)
-
-A commit's patch can never be re-applied on top of itself: its context lines
-describe the tree from *before* the commit. Fuzzy application (`git apply
--C0`) is not the answer - it silently drops single-line additions at the end
-of the file. So `git repatch` only ever does strict applies:
-
-1. **Probe.** `git apply -R --check` tells whether the change is present in
-   the working tree, exactly; the forward check tells whether it is absent.
-   That picks duplicate vs plain mode. Anything in between is refused with an
-   explanation (a failed strict apply is atomic - nothing is half-written).
-2. **Re-base the patch onto the current tree.** In a temp directory the
-   source patch is reverse-applied to copies of the touched files,
-   reconstructing "tree without the change"; re-diffing that against the real
-   files yields every added block in *current* line numbers, from which the
-   buffer is built: current lines as context, a duplicate of each block
-   seeded after its original.
-3. **Recount, then strict apply.** Your edits invalidate the `@@` headers,
-   and `git apply --recount` would misplace later hunks, so repatch
-   recomputes the headers itself and applies with no leniency flags at all,
-   from the repo toplevel. The applied patch is kept at `.git/REPATCH.diff`.
-
 ## Caveats
 
 - Repatching the *same commit* twice fails the presence probe (your first
@@ -129,6 +84,6 @@ of the file. So `git repatch` only ever does strict applies:
 
 ## Tests
 
-```
-tests/run.sh
+```bash
+./tests/run.sh
 ```
