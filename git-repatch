@@ -195,6 +195,7 @@ else
 		printf '        git add -u && git repatch --staged\n'
 		printf '  - uncommitted edits overlap the source change: commit or stash them first\n'
 		printf '  - the source commit is older history that later commits reworked\n'
+		# shellcheck disable=SC2016  # the backticks are literal message text
 		printf 'git said (probing for the change with `git apply -R --check`):\n'
 		sed 's/^/    /;3q' "$TMP/probe.err"
 	} >&2
