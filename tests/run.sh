@@ -319,6 +319,7 @@ make_repo "$WORK/t22"
 cat > "$WORK/ed22" <<EOF
 #!/bin/sh
 cp "\$1" "$WORK/t22.buffer"
+touch "\$1"   # save without changes
 EOF
 chmod +x "$WORK/ed22"
 ( cd "$WORK/t22" && GIT_EDITOR="$WORK/ed22" "$TOOL" -q -s "$SEDT" -s "$SEDR" )
@@ -334,6 +335,26 @@ make_repo "$WORK/t23"
 is "no-edit: exit code" "$?" 0
 is "no-edit: verbatim duplicate" "$(sed -n '3,4p' "$WORK/t23/a.py" | tr '\n' '|')" \
 	"foo_timeout = 5|foo_timeout = 5|"
+
+# --- 24: quitting the editor without saving aborts ----------------------------
+
+make_repo "$WORK/t24"
+printf '#!/bin/sh\nexit 0\n' > "$WORK/ed24"; chmod +x "$WORK/ed24"
+err=$( cd "$WORK/t24" && GIT_EDITOR="$WORK/ed24" "$TOOL" -q 2>&1 )
+is "unsaved: exit code" "$?" 1
+case "$err" in *"not saved"*) ok "unsaved: explained" ;; *) bad "unsaved: explained ($err)" ;; esac
+clean_tree "$WORK/t24" && ok "unsaved: tree untouched" || bad "unsaved: tree untouched"
+
+# save a broken edit, then quit the retry round without saving: still aborts
+cat > "$WORK/ed24b" <<'EOF'
+#!/bin/sh
+if grep -q 'APPLY FAILED' "$1"; then exit 0; fi
+sed 's/foo/bar/g' "$1" > "$1.n" && mv "$1.n" "$1"
+EOF
+chmod +x "$WORK/ed24b"
+( cd "$WORK/t24" && GIT_EDITOR="$WORK/ed24b" "$TOOL" -q 2>/dev/null )
+is "unsaved retry: exit code" "$?" 1
+clean_tree "$WORK/t24" && ok "unsaved retry: tree untouched" || bad "unsaved retry: tree untouched"
 
 # ------------------------------------------------------------------------------
 

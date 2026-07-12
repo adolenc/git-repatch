@@ -58,9 +58,9 @@ options
 In the editor: edit ONLY the '+' lines; context lines must keep matching your
 tree. Deleting a '+' line, a hunk, or a file section skips it. Changing a
 context line's leading ' ' to '-' deletes that line from your tree. Lines
-starting with '#' are ignored ('#c' marks extra context from -U). An empty
-file aborts. Failed applies write nothing and reopen the editor with git's
-error message.
+starting with '#' are ignored ('#c' marks extra context from -U). Quitting
+without saving, or an empty file, aborts. Failed applies write nothing and
+reopen the editor with git's error message.
 EOF
 	exit 0
 }
@@ -389,7 +389,7 @@ write_buffer() {  # $1 = path of an error file to quote, or ""
 # apply fail (nothing is written on failure, and you get to retry).
 # To also delete an existing line, change its leading ' ' to '-'.
 # Drop a '+' line / hunk / file section to skip it. '#' lines are ignored.
-# Save and quit to apply to the working tree; an empty file aborts.
+# Save and quit to apply to the working tree; quit without saving to abort.
 EOF
 		grep -q '^#c' "$TMP/body.diff" \
 			&& printf "# '#c' lines are extra context (--unified): display only, ignored on apply.\n"
@@ -422,6 +422,7 @@ fi
 
 if [ -z "$NO_EDIT" ]; then
 	EDITOR_CMD=$(git var GIT_EDITOR) || die 3 "no editor configured (core.editor / GIT_EDITOR / EDITOR)"
+	touch -t 200001010000 "$TMP/stamp"
 fi
 
 # ---------------------------------------------------------------------------
@@ -479,7 +480,11 @@ recount() {  # stdin: '#'-stripped patch, stdout: renumbered patch
 
 while :; do
 	if [ -z "$NO_EDIT" ]; then
+		# saving is the consent to apply: hand the editor a backdated buffer;
+		# an mtime still stuck in the past means the user quit without saving
+		touch -r "$TMP/stamp" "$BUFFER"
 		eval "$EDITOR_CMD" '"$BUFFER"' || die 2 "editor exited non-zero; nothing applied (buffer kept: $BUFFER)"
+		[ "$BUFFER" -nt "$TMP/stamp" ] || die 1 "buffer not saved, nothing applied"
 	fi
 
 	grep -v '^#' "$BUFFER" > "$TMP/stripped"
