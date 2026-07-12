@@ -43,7 +43,6 @@ options
                    only (repeatable); skips the editor unless --edit
       --edit       open the editor even when -s is given
   -U, --unified N  context lines around each change (default 3, minimum 1)
-      --plain      force plain mode (skip the presence probe)
       --check      dry run: validate everything, write nothing
   -q, --quiet      suppress the report
 ```
@@ -66,8 +65,8 @@ git add -u && git repatch --staged -s 's/bar/baz/'
 # replay one commit's change, editing as you go, in src/ only
 git repatch HEAD~3 -- src/
 
-# take a change from another branch, renamed on the way in
-git repatch main..topic
+# duplicate a range of commits in current branch
+git repatch HEAD~5..HEAD~2
 ```
 
 ## Caveats

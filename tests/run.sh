@@ -129,13 +129,13 @@ is "stack: exit code" "$?" 0
 is "stack: foo,bar,baz in order" "$(sed -n '3,5p' "$WORK/t5/a.py" | tr '\n' '|')" \
 	"foo_timeout = 5|bar_timeout = 10|baz_timeout = 99|"
 
-# --- 6: plain mode (change absent from the tree) -----------------------------
+# --- 6: change absent from the tree is refused with guidance ------------------
 
 make_repo "$WORK/t6"
-( cd "$WORK/t6" && git checkout -q base && "$TOOL" -q foo -s "$SEDT" -s "$SEDR" )
-is "plain: exit code" "$?" 0
-is "plain: lands at original location" "$(line "$WORK/t6/a.py" 3)" "bar_timeout = 10"
-is "plain: second hunk" "$(line "$WORK/t6/a.py" 7)" "    bar_retry = 6"
+err=$( cd "$WORK/t6" && git checkout -q base && "$TOOL" -q foo -s "$SEDT" 2>&1 )
+is "absent: exit code" "$?" 2
+case "$err" in *absent*) ok "absent: explained" ;; *) bad "absent: explained ($err)" ;; esac
+clean_tree "$WORK/t6" && ok "absent: tree untouched" || bad "absent: tree untouched"
 
 # --- 7: empty buffer aborts, tree untouched ----------------------------------
 
@@ -289,17 +289,7 @@ is "unified: dup -U1 first hunk" "$(grep -m1 '^@@ ' "$WORK/t21.buffer")" "@@ -2,
 is "unified: -U1 end-to-end exit code" "$?" 0
 is "unified: -U1 placement" "$(line "$WORK/t21/a.py" 4)" "bar_timeout = 10"
 
-make_repo "$WORK/t21p"
-cat > "$WORK/ed21p" <<EOF
-#!/bin/sh
-cp "\$1" "$WORK/t21p.buffer"
-: > "\$1"
-EOF
-chmod +x "$WORK/ed21p"
-( cd "$WORK/t21p" && git checkout -q base && GIT_EDITOR="$WORK/ed21p" "$TOOL" -q foo -U 1 2>/dev/null )
-is "unified: plain -U1 hunk count" "$(grep -c '^@@ ' "$WORK/t21p.buffer")" 4
-
-err=$( cd "$WORK/t21" && "$TOOL" -q -U0 2>&1 )
+err=$( cd "$WORK/t21" && "$TOOL" -q -U 0 2>&1 )
 is "unified: -U0 refused" "$?" 3
 case "$err" in *"at least 1"*) ok "unified: -U0 explained" ;; *) bad "unified: -U0 explained ($err)" ;; esac
 err=$( cd "$WORK/t21" && "$TOOL" -q --unified=lots 2>&1 )

@@ -34,11 +34,10 @@ Turn a change into an editable patch, open it in your editor, and strictly
 apply the saved result to the working tree as unstaged changes. HEAD and the
 index are never touched.
 
-If the source change is already in your working tree (the usual case: you
-just committed it), you get "duplicate" mode: the original change is shown as
-context with a pre-seeded copy of every added block as '+' lines -- edit the
-copy, save, and the sibling change lands right after the original. If the
-change is absent, you get "plain" mode: the raw patch, cherry-pick-with-edit.
+The source change must already sit in your working tree (the usual case: you
+just committed it). The buffer shows it as context with a pre-seeded copy of
+every added block as '+' lines -- edit the copy, save, and the sibling change
+lands right after the original.
 
 source (default: HEAD)
   <rev>            that commit's diff          e.g. git repatch HEAD~2
@@ -51,7 +50,6 @@ options
                    only (repeatable); skips the editor unless --edit
       --edit       open the editor even when -s is given
   -U, --unified N  context lines around each change (default 3, minimum 1)
-      --plain      force plain mode (skip the presence probe)
       --check      dry run: validate everything, write nothing
   -q, --quiet      suppress the report
   -h, --help       this
@@ -69,7 +67,7 @@ EOF
 # args
 
 SOURCE=HEAD; KIND=rev; SEEN_SRC=
-SEDEXPRS=(); DO_EDIT=; DO_PLAIN=; DO_CHECK=; QUIET=; UCTX=3
+SEDEXPRS=(); DO_EDIT=; DO_CHECK=; QUIET=; UCTX=3
 PATHSPEC=()
 
 while [ $# -gt 0 ]; do
@@ -86,7 +84,6 @@ while [ $# -gt 0 ]; do
 	-U*)               UCTX=${1#-U} ;;
 	--unified=*)       UCTX=${1#--unified=} ;;
 	--edit)            DO_EDIT=1 ;;
-	--plain)           DO_PLAIN=1 ;;
 	--check)           DO_CHECK=1 ;;
 	-q|--quiet)        QUIET=1 ;;
 	--)                shift; while [ $# -gt 0 ]; do PATHSPEC[${#PATHSPEC[@]}]=$1; shift; done; break ;;
@@ -120,7 +117,9 @@ APPLIED=$GITDIR/REPATCH.diff       # last successfully applied patch
 HARDEN=(-c color.ui=false -c core.quotePath=false -c diff.noprefix=false
         -c diff.mnemonicPrefix=false -c diff.external= -c diff.relative=false
         -c diff.suppressBlankEmpty=false)
-DIFFOPTS=(--patch --no-color --no-ext-diff --no-textconv --no-renames -U"$UCTX")
+# The source diff is internal (presence probe + reverse-apply), so its
+# context is pinned at 3; --unified shapes only the editor buffer.
+DIFFOPTS=(--patch --no-color --no-ext-diff --no-textconv --no-renames -U3)
 
 # ---------------------------------------------------------------------------
 # 1. generate the source patch
@@ -171,21 +170,17 @@ awk -v NOTES="$TMP/notes" '
 grep -q '^diff --git ' "$TMP/src.diff" || die 1 "nothing repatchable in $LABEL (only binary/submodule changes)"
 
 # ---------------------------------------------------------------------------
-# 2. probe: is the source change present in the working tree or not?
+# 2. probe: the source change must sit in the working tree, exactly.
 #
 # Strictly. `git apply -R --check` succeeds iff every hunk of the change,
-# context included, sits in the tree exactly; the forward check succeeds iff
-# the tree looks like the change was never applied. Anything in between has
-# no safe interpretation, so we stop and say why.
+# context included, sits in the tree exactly. A cleanly absent change gets
+# its own message (the forward check succeeds iff the tree looks like the
+# change was never applied); anything in between has no safe interpretation,
+# so we stop and say why.
 
-MODE=
-if [ -n "$DO_PLAIN" ]; then
-	MODE=plain
-elif git -C "$TOP" apply --check -R "$TMP/src.diff" 2>"$TMP/probe.err"; then
-	MODE=dup
-elif git -C "$TOP" apply --check "$TMP/src.diff" 2>/dev/null; then
-	MODE=plain
-else
+if ! git -C "$TOP" apply --check -R "$TMP/src.diff" 2>"$TMP/probe.err"; then
+	git -C "$TOP" apply --check "$TMP/src.diff" 2>/dev/null && die 2 \
+		"the source change is absent from your working tree, and repatch duplicates a change that is already there; apply or cherry-pick it first"
 	{
 		printf '%s: the source change is neither cleanly present in nor cleanly absent\n' "$PROG"
 		printf 'from your working tree, so an edited copy has no safe place to land.\n'
@@ -205,165 +200,159 @@ fi
 # ---------------------------------------------------------------------------
 # 3. build the editor buffer body
 #
-# plain mode: the source patch itself.
-#
-# dup mode: the patch cannot be applied on top of itself (its context
-# describes the tree from *before* the change), so re-base it onto the
-# current tree: reverse-apply the source in a temp copy to reconstruct
-# "current minus change", re-diff with -U0 to learn where every added block
-# sits in *current* line numbers, insert a duplicate of each block right
-# after the original in a second temp copy, and let git diff render the
-# result as a conventional patch whose pre-image IS the current tree.
+# The patch cannot be applied on top of itself (its context describes the
+# tree from *before* the change), so re-base it onto the current tree:
+# reverse-apply the source in a temp copy to reconstruct "current minus
+# change", re-diff with -U0 to learn where every added block sits in
+# *current* line numbers, insert a duplicate of each block right after the
+# original in a second temp copy, and let git diff render the result as a
+# conventional patch whose pre-image IS the current tree.
 
 : > "$TMP/notes.dup"; : > "$TMP/commented"
 
-if [ "$MODE" = plain ]; then
-	cp "$TMP/src.diff" "$TMP/body.diff"
-else
-	# paths touched by the (sanitized) source patch
-	awk '
-		/^--- a\// { p = substr($0, 7) } /^\+\+\+ b\// { p = substr($0, 7) }
-		/^(---|\+\+\+) / { if (p != "") { sub(/\t$/, "", p); if (!seen[p]++) print p; p = "" } }
-	' "$TMP/src.diff" > "$TMP/paths"
+# paths touched by the (sanitized) source patch
+awk '
+	/^--- a\// { p = substr($0, 7) } /^\+\+\+ b\// { p = substr($0, 7) }
+	/^(---|\+\+\+) / { if (p != "") { sub(/\t$/, "", p); if (!seen[p]++) print p; p = "" } }
+' "$TMP/src.diff" > "$TMP/paths"
 
-	mkdir -p "$TMP/cur"; : > "$TMP/nonl"
-	while IFS= read -r p; do
-		[ -f "$TOP/$p" ] || continue        # deleted by source: reverse-apply recreates it
-		mkdir -p "$TMP/cur/$(dirname "$p")"
-		cp -p "$TOP/$p" "$TMP/cur/$p"
-		[ -n "$(tail -c1 "$TOP/$p")" ] && printf '%s\n' "$p" >> "$TMP/nonl"
-	done < "$TMP/paths"
+mkdir -p "$TMP/cur"; : > "$TMP/nonl"
+while IFS= read -r p; do
+	[ -f "$TOP/$p" ] || continue        # deleted by source: reverse-apply recreates it
+	mkdir -p "$TMP/cur/$(dirname "$p")"
+	cp -p "$TOP/$p" "$TMP/cur/$p"
+	[ -n "$(tail -c1 "$TOP/$p")" ] && printf '%s\n' "$p" >> "$TMP/nonl"
+done < "$TMP/paths"
 
-	cp -pR "$TMP/cur" "$TMP/base"
-	git -C "$TMP/base" apply -R --whitespace=nowarn "$TMP/src.diff" \
-		|| die 2 "internal: reverse-apply diverged from the probe (tree changed underneath us?)"
+cp -pR "$TMP/cur" "$TMP/base"
+git -C "$TMP/base" apply -R --whitespace=nowarn "$TMP/src.diff" \
+	|| die 2 "internal: reverse-apply diverged from the probe (tree changed underneath us?)"
 
-	git -C "$TMP" "${HARDEN[@]}" diff --no-index --no-color --no-ext-diff -U0 base cur > "$TMP/rediff"
-	case $? in 0|1) ;; *) die 3 "internal: re-diff failed" ;; esac
+git -C "$TMP" "${HARDEN[@]}" diff --no-index --no-color --no-ext-diff -U0 base cur > "$TMP/rediff"
+case $? in 0|1) ;; *) die 3 "internal: re-diff failed" ;; esac
 
-	# rediff -> the editor buffer body: for each added block, a full-context
-	# hunk (context read back from the current file) with a '+' duplicate of
-	# the block seeded right after the original. Built by hand rather than
-	# re-diffed through git: rendering a self-adjacent duplication is
-	# ambiguous (the diff "slider" problem) and git may rotate the copy
-	# across the original, which would make the seeds straddle it.
-	: > "$TMP/body.diff"
-	awk -v CUR="$TMP/cur" -v BODY="$TMP/body.diff" -v COM="$TMP/commented" \
-	    -v NOTES="$TMP/notes.dup" -v NONL="$TMP/nonl" -v U="$UCTX" '
-		BEGIN { while ((getline l < NONL) > 0) nonl[l] = 1; close(NONL) }
-		function flush(   f, ln, nl, r, gs, ge, nr, nls, nle, ls, le, ins, k, i, pre, delta, emitted) {
-			if (state == "normal" && nrun > 0) {
-				f = CUR "/" rel
-				nl = 0; split("", L)
-				while ((getline ln < f) > 0) L[++nl] = ln
-				close(f)
-				delta = 0; emitted = 0
-				r = 1
-				while (r <= nrun) {
-					if (runbad[r]) {
-						print "# note: " rel ": skipped a block at end-of-file without a trailing newline" > NOTES
-						r++; continue
-					}
-					# group runs whose context windows touch into one hunk
-					gs = r; ge = r
-					ls = runstart[r] - U; if (ls < 1) ls = 1
-					le = runend[r] + U; if (le > nl) le = nl
-					while (ge + 1 <= nrun && !runbad[ge + 1]) {
-						nr = ge + 1
-						nls = runstart[nr] - U; if (nls < 1) nls = 1
-						if (nls > le + 1) break
-						ge = nr
-						nle = runend[nr] + U; if (nle > nl) nle = nl
-						if (nle > le) le = nle
-					}
-					ins = 0
-					for (k = gs; k <= ge; k++) ins += runlen[k]
-					if (!emitted) {
-						print "diff --git a/" rel " b/" rel > BODY
-						print "--- a/" rel > BODY
-						print "+++ b/" rel > BODY
-						emitted = 1
-					}
-					pre = le - ls + 1
-					printf "@@ -%d,%d +%d,%d @@\n", ls, pre, ls + delta, pre + ins > BODY
-					i = ls
-					for (k = gs; k <= ge; k++) {
-						while (i <= runend[k]) { print " " L[i] > BODY; i++ }
-						printf "%s", runbuf[k] > BODY
-					}
-					while (i <= le) {
-						print " " L[i] > BODY
-						# a hunk with no trailing context only applies at
-						# EOF, so context always extends to the last line;
-						# mark it incomplete when the file ends without \n
-						if (i == nl && (rel in nonl))
-							print "\\ No newline at end of file" > BODY
-						i++
-					}
-					delta += ins
-					r = ge + 1
+# rediff -> the editor buffer body: for each added block, a full-context
+# hunk (context read back from the current file) with a '+' duplicate of
+# the block seeded right after the original. Built by hand rather than
+# re-diffed through git: rendering a self-adjacent duplication is
+# ambiguous (the diff "slider" problem) and git may rotate the copy
+# across the original, which would make the seeds straddle it.
+: > "$TMP/body.diff"
+awk -v CUR="$TMP/cur" -v BODY="$TMP/body.diff" -v COM="$TMP/commented" \
+    -v NOTES="$TMP/notes.dup" -v NONL="$TMP/nonl" -v U="$UCTX" '
+	BEGIN { while ((getline l < NONL) > 0) nonl[l] = 1; close(NONL) }
+	function flush(   f, ln, nl, r, gs, ge, nr, nls, nle, ls, le, ins, k, i, pre, delta, emitted) {
+		if (state == "normal" && nrun > 0) {
+			f = CUR "/" rel
+			nl = 0; split("", L)
+			while ((getline ln < f) > 0) L[++nl] = ln
+			close(f)
+			delta = 0; emitted = 0
+			r = 1
+			while (r <= nrun) {
+				if (runbad[r]) {
+					print "# note: " rel ": skipped a block at end-of-file without a trailing newline" > NOTES
+					r++; continue
 				}
-			} else if (state == "new") {
-				print "# note: " rel ": created by the source change; a file cannot be duplicated" > NOTES
-				print "#       onto itself. a commented copy is at the bottom of this buffer:" > NOTES
-				print "#       remove the leading \"# \" and change its paths to create a sibling." > NOTES
-				for (r = 1; r <= nsec; r++) print "# " secline[r] > COM
-			} else if (state == "del") {
-				print "# note: " rel ": deleted by the source change; nothing to duplicate" > NOTES
+				# group runs whose context windows touch into one hunk
+				gs = r; ge = r
+				ls = runstart[r] - U; if (ls < 1) ls = 1
+				le = runend[r] + U; if (le > nl) le = nl
+				while (ge + 1 <= nrun && !runbad[ge + 1]) {
+					nr = ge + 1
+					nls = runstart[nr] - U; if (nls < 1) nls = 1
+					if (nls > le + 1) break
+					ge = nr
+					nle = runend[nr] + U; if (nle > nl) nle = nl
+					if (nle > le) le = nle
+				}
+				ins = 0
+				for (k = gs; k <= ge; k++) ins += runlen[k]
+				if (!emitted) {
+					print "diff --git a/" rel " b/" rel > BODY
+					print "--- a/" rel > BODY
+					print "+++ b/" rel > BODY
+					emitted = 1
+				}
+				pre = le - ls + 1
+				printf "@@ -%d,%d +%d,%d @@\n", ls, pre, ls + delta, pre + ins > BODY
+				i = ls
+				for (k = gs; k <= ge; k++) {
+					while (i <= runend[k]) { print " " L[i] > BODY; i++ }
+					printf "%s", runbuf[k] > BODY
+				}
+				while (i <= le) {
+					print " " L[i] > BODY
+					# a hunk with no trailing context only applies at
+					# EOF, so context always extends to the last line;
+					# mark it incomplete when the file ends without \n
+					if (i == nl && (rel in nonl))
+						print "\\ No newline at end of file" > BODY
+					i++
+				}
+				delta += ins
+				r = ge + 1
 			}
-			state = "none"; nrun = 0; nsec = 0; rel = ""; isnew = 0; isdel = 0
+		} else if (state == "new") {
+			print "# note: " rel ": created by the source change; a file cannot be duplicated" > NOTES
+			print "#       onto itself. a commented copy is at the bottom of this buffer:" > NOTES
+			print "#       remove the leading \"# \" and change its paths to create a sibling." > NOTES
+			for (r = 1; r <= nsec; r++) print "# " secline[r] > COM
+		} else if (state == "del") {
+			print "# note: " rel ": deleted by the source change; nothing to duplicate" > NOTES
 		}
-		/^diff --git / {
-			flush(); state = "head"
+		state = "none"; nrun = 0; nsec = 0; rel = ""; isnew = 0; isdel = 0
+	}
+	/^diff --git / {
+		flush(); state = "head"
+		l = $0
+		gsub(/ a\/cur\//, " a/", l); gsub(/ b\/cur\//, " b/", l)
+		gsub(/ a\/base\//, " a/", l); gsub(/ b\/base\//, " b/", l)
+		secline[++nsec] = l
+		next
+	}
+	state == "none" { next }
+	state == "head" {
+		if ($0 ~ /^@@ /) {
+			state = isnew ? "new" : (isdel ? "del" : "normal")
+		} else {
+			if ($0 ~ /^--- \/dev\/null/) isnew = 1
+			if ($0 ~ /^\+\+\+ \/dev\/null/) isdel = 1
+			if ($0 ~ /^\+\+\+ b\/cur\//) { rel = substr($0, 11); sub(/\t$/, "", rel) }
+			if ($0 ~ /^--- a\/base\//)   { if (rel == "") { rel = substr($0, 12); sub(/\t$/, "", rel) } }
 			l = $0
-			gsub(/ a\/cur\//, " a/", l); gsub(/ b\/cur\//, " b/", l)
-			gsub(/ a\/base\//, " a/", l); gsub(/ b\/base\//, " b/", l)
+			sub(/^\+\+\+ b\/cur\//, "+++ b/", l)
+			sub(/^--- a\/base\//, "--- a/", l)
 			secline[++nsec] = l
 			next
 		}
-		state == "none" { next }
-		state == "head" {
-			if ($0 ~ /^@@ /) {
-				state = isnew ? "new" : (isdel ? "del" : "normal")
-			} else {
-				if ($0 ~ /^--- \/dev\/null/) isnew = 1
-				if ($0 ~ /^\+\+\+ \/dev\/null/) isdel = 1
-				if ($0 ~ /^\+\+\+ b\/cur\//) { rel = substr($0, 11); sub(/\t$/, "", rel) }
-				if ($0 ~ /^--- a\/base\//)   { if (rel == "") { rel = substr($0, 12); sub(/\t$/, "", rel) } }
-				l = $0
-				sub(/^\+\+\+ b\/cur\//, "+++ b/", l)
-				sub(/^--- a\/base\//, "--- a/", l)
-				secline[++nsec] = l
-				next
-			}
+	}
+	state == "new" { secline[++nsec] = $0; next }
+	state == "del" { next }
+	# state == "normal": hunks of the -U0 rediff
+	/^@@ / {
+		c = $3; sub(/^\+/, "", c); d = c
+		sub(/,.*/, "", c); if (d ~ /,/) sub(/^[0-9]*,/, "", d); else d = 1
+		c += 0; d += 0
+		if (d > 0) {
+			nrun++
+			runstart[nrun] = c; runend[nrun] = c + d - 1
+			runlen[nrun] = 0; runbuf[nrun] = ""; runbad[nrun] = 0
+			open = 1
 		}
-		state == "new" { secline[++nsec] = $0; next }
-		state == "del" { next }
-		# state == "normal": hunks of the -U0 rediff
-		/^@@ / {
-			c = $3; sub(/^\+/, "", c); d = c
-			sub(/,.*/, "", c); if (d ~ /,/) sub(/^[0-9]*,/, "", d); else d = 1
-			c += 0; d += 0
-			if (d > 0) {
-				nrun++
-				runstart[nrun] = c; runend[nrun] = c + d - 1
-				runlen[nrun] = 0; runbuf[nrun] = ""; runbad[nrun] = 0
-				open = 1
-			}
-			else open = 0
-			lastp = ""
-			next
-		}
-		/^\+/  { if (open) { runbuf[nrun] = runbuf[nrun] $0 "\n"; runlen[nrun]++; lastp = "+" }; next }
-		/^-/   { lastp = "-"; next }
-		/^\\/  { if (open && lastp == "+") runbad[nrun] = 1; next }
-		END { flush() }
-	' "$TMP/rediff" || die 3 "internal: could not transform the re-diff"
+		else open = 0
+		lastp = ""
+		next
+	}
+	/^\+/  { if (open) { runbuf[nrun] = runbuf[nrun] $0 "\n"; runlen[nrun]++; lastp = "+" }; next }
+	/^-/   { lastp = "-"; next }
+	/^\\/  { if (open && lastp == "+") runbad[nrun] = 1; next }
+	END { flush() }
+' "$TMP/rediff" || die 3 "internal: could not transform the re-diff"
 
-	if ! [ -s "$TMP/body.diff" ] && ! [ -s "$TMP/commented" ]; then
-		[ -s "$TMP/notes.dup" ] && sed 's/^# //' "$TMP/notes.dup" >&2
-		die 1 "nothing to duplicate in $LABEL (additions are what repatch copies; see --plain)"
-	fi
+if ! [ -s "$TMP/body.diff" ] && ! [ -s "$TMP/commented" ]; then
+	[ -s "$TMP/notes.dup" ] && sed 's/^# //' "$TMP/notes.dup" >&2
+	die 1 "nothing to duplicate in $LABEL (additions are what repatch copies)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -371,11 +360,7 @@ fi
 
 write_buffer() {  # $1 = path of an error file to quote, or ""
 	{
-		if [ "$MODE" = dup ]; then
-			printf '# repatch %s\n# -> duplicate into the working tree\n' "$LABEL"
-		else
-			printf '# repatch %s\n# -> apply to the working tree (change not present: plain mode)\n' "$LABEL"
-		fi
+		printf '# repatch %s\n# -> duplicate into the working tree\n' "$LABEL"
 		if [ -n "$1" ] && [ -s "$1" ]; then
 			printf '#\n# APPLY FAILED -- git said:\n'
 			sed 's/^/#     /' "$1"
